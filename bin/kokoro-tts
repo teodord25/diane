@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+# tts <out.wav> <text> with Kokoro-82M via kokoro-onnx (pip install kokoro-onnx soundfile).
+# DIANE_VOICE is a Kokoro voice id, e.g. am_michael. Model files go next to the whisper model.
+import os, sys
+import soundfile as sf
+from kokoro_onnx import Kokoro
+share = os.path.expanduser("~/.local/share/diane")
+k = Kokoro(os.path.join(share, "kokoro-v1.0.onnx"), os.path.join(share, "voices-v1.0.bin"))
+samples, rate = k.create(sys.argv[2], voice=os.environ.get("DIANE_VOICE") or "am_michael", speed=1.0, lang="en-us")
+sf.write(sys.argv[1], samples, rate)

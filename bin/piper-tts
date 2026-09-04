@@ -1,0 +1,3 @@
+#!/bin/sh
+# tts <out.wav> <text> with Piper. DIANE_VOICE is the path to a .onnx voice.
+exec piper -m "${DIANE_VOICE:?set DIANE_VOICE to a piper .onnx voice}" -f "$1" -- "$2"
