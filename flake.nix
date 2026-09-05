@@ -19,6 +19,7 @@
         src = ./.;
         vendorHash = null; # zero external Go dependencies; keep it that way
         nativeBuildInputs = [ pkgs.makeWrapper ];
+        nativeCheckInputs = [ pkgs.git ];
         postInstall = ''
           install -m755 bin/* $out/bin/
           wrapProgram $out/bin/diane --prefix PATH : "${pkgs.lib.makeBinPath (runtimeDeps pkgs)}:$out/bin"
