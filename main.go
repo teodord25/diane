@@ -21,7 +21,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Config comes entirely from the environment, so the Nix module, the
@@ -31,9 +33,14 @@ type Config struct {
 	Token string // serve: shared secret for the phone and the page
 	Addr  string // serve: listen address
 
-	Backend      string // "local" or "anthropic"
-	LLMURL       string // local: OpenAI-compatible chat endpoint
-	LLMModel     string // local: model name to request, mostly cosmetic
+	Backend    string // "local" or "anthropic"
+	LLMURL     string // local: OpenAI-compatible chat endpoint
+	LLMModel   string // local: model name to request, mostly cosmetic
+	SmartURL   string // where a "!" utterance goes instead: another
+	SmartModel string // OpenAI-compatible server, or the word "anthropic"
+	Timeout    time.Duration
+	MaxTokens  int // ceiling per reply. A thinking model needs room for the
+	//                 reasoning as well as the answer.
 	ClaudeModel  string // anthropic
 	APIKey       string // anthropic
 	RecBin       string
@@ -55,7 +62,11 @@ func loadConfig() Config {
 		Addr:         env("DIANE_ADDR", "0.0.0.0:7777"),
 		Backend:      env("DIANE_BACKEND", "local"),
 		LLMURL:       env("DIANE_LLM_URL", "http://127.0.0.1:8080/v1/chat/completions"),
-		LLMModel:     env("DIANE_LLM_MODEL", "qwen2.5-14b-instruct"),
+		LLMModel:     env("DIANE_LLM_MODEL", "gemma-4-12b-it-qat"),
+		SmartURL:     os.Getenv("DIANE_SMART_URL"),
+		SmartModel:   env("DIANE_SMART_MODEL", "glm-5.2"),
+		Timeout:      duration("DIANE_TIMEOUT", 30*time.Minute),
+		MaxTokens:    number("DIANE_MAX_TOKENS", 16384),
 		ClaudeModel:  env("DIANE_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
 		APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
 		RecBin:       env("DIANE_REC_BIN", "rec"),
@@ -132,6 +143,12 @@ ENVIRONMENT
                      machine to run the model on your PC and the interface
                      on your laptop.
   DIANE_LLM_MODEL    model name sent to that server
+  DIANE_SMART_URL    where a ! utterance goes: another OpenAI-compatible
+                     server, or the word anthropic
+  DIANE_SMART_MODEL  model name sent to that server
+  DIANE_TIMEOUT      how long to wait for a reply, e.g. 30m
+  DIANE_MAX_TOKENS   ceiling per reply; a thinking model needs room for the
+                     reasoning as well as the answer
   DIANE_CLAUDE_MODEL, ANTHROPIC_API_KEY   used when DIANE_BACKEND=anthropic
   DIANE_TOKEN        shared secret for serve. Same on every device.
   DIANE_ADDR         what serve listens on
@@ -164,6 +181,22 @@ func modelDesc(cfg Config) string {
 		return cfg.ClaudeModel + " (" + key + ")"
 	}
 	return cfg.LLMModel + " at " + cfg.LLMURL
+}
+
+// number parses an integer from the environment.
+func number(key string, def int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil {
+		return n
+	}
+	return def
+}
+
+// duration parses a Go duration ("90s", "30m") from the environment.
+func duration(key string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil {
+		return d
+	}
+	return def
 }
 
 func env(key, def string) string {
@@ -272,6 +305,25 @@ func main() {
 	}
 }
 
+// route sends an utterance prefixed with "!" to the smart backend instead of
+// the everyday one: a bigger, slower model for the turns worth waiting for.
+// It changes only this turn; the next one is back to the fast model.
+func route(cfg Config, utterance string) (Config, string) {
+	rest, ok := strings.CutPrefix(utterance, "!")
+	if !ok {
+		return cfg, utterance
+	}
+	switch {
+	case cfg.SmartURL == "":
+		warn("DIANE_SMART_URL is not set; using the everyday model")
+	case cfg.SmartURL == "anthropic":
+		cfg.Backend = "anthropic"
+	default:
+		cfg.Backend, cfg.LLMURL, cfg.LLMModel = "local", cfg.SmartURL, cfg.SmartModel
+	}
+	return cfg, strings.TrimSpace(rest)
+}
+
 // anton runs the conversation loop. Typed mode reads a line per turn from
 // stdin; voice mode records an utterance per turn.
 func anton(cfg Config, v Vault, once string, voice, quiet bool) {
@@ -306,6 +358,7 @@ func anton(cfg Config, v Vault, once string, voice, quiet bool) {
 		}()
 	}
 	say := func(utterance string) {
+		cfg, utterance := route(cfg, utterance)
 		reply, err := turn(cfg, v, &history, utterance)
 		if err != nil {
 			warn("%v", err)

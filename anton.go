@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 // Anton is the secretary. Every turn he is shown the whole vault and one
@@ -37,9 +36,6 @@ Reply with a single JSON object and nothing else. No prose, no code fence.
 Rules:
 
 - "speak" is required. Always say something, even if only "Done."
-- "speak" must stand alone. Never end it with a colon or a promise of content
-  that only exists in a file — if you were asked to produce something, say it
-  in "speak" as well as writing it.
 - "writes" replaces a file's entire contents. Include every line you intend to
   keep, not just the changed ones. Omit files you are not changing. Use an empty
   list when you are changing nothing.
@@ -69,8 +65,6 @@ type Reply struct {
 	Writes  []Write  `json:"writes"`
 	Deletes []string `json:"deletes"`
 }
-
-var modelClient = &http.Client{Timeout: 180 * time.Second}
 
 // turn is one complete interaction: fold in new captures, read the vault, ask
 // the model, apply what it decided, and return what to say.
@@ -130,7 +124,7 @@ func prompt(files []File, utterance string) string {
 
 // post sends JSON and returns the response body, turning HTTP-level failures
 // into errors that name the server that failed.
-func post(url string, headers map[string]string, payload any) ([]byte, error) {
+func post(cfg Config, url string, headers map[string]string, payload any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -143,7 +137,7 @@ func post(url string, headers map[string]string, payload any) ([]byte, error) {
 	for k, val := range headers {
 		req.Header.Set(k, val)
 	}
-	resp, err := modelClient.Do(req)
+	resp, err := (&http.Client{Timeout: cfg.Timeout}).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s unreachable: %w", url, err)
 	}
@@ -163,11 +157,11 @@ func post(url string, headers map[string]string, payload any) ([]byte, error) {
 func askLocal(cfg Config, files []File, history []Message, utterance string) (*Reply, error) {
 	msgs := append([]Message{{Role: "system", Content: systemPrompt}}, history...)
 	msgs = append(msgs, Message{Role: "user", Content: prompt(files, utterance)})
-	out, err := post(cfg.LLMURL, nil, map[string]any{
+	out, err := post(cfg, cfg.LLMURL, nil, map[string]any{
 		"model":       cfg.LLMModel,
 		"messages":    msgs,
 		"temperature": 0,
-		"max_tokens":  4096,
+		"max_tokens":  cfg.MaxTokens,
 		"stream":      false,
 		// Constrains llama-server to valid JSON. parseReply still guards
 		// against servers that ignore it.
@@ -194,12 +188,12 @@ func askAnthropic(cfg Config, files []File, history []Message, utterance string)
 		Message{Role: "user", Content: prompt(files, utterance)},
 		Message{Role: "assistant", Content: "{"}, // prefill so the model emits bare JSON
 	)
-	out, err := post("https://api.anthropic.com/v1/messages", map[string]string{
+	out, err := post(cfg, "https://api.anthropic.com/v1/messages", map[string]string{
 		"x-api-key":         cfg.APIKey,
 		"anthropic-version": "2023-06-01",
 	}, map[string]any{
 		"model":      cfg.ClaudeModel,
-		"max_tokens": 2048,
+		"max_tokens": cfg.MaxTokens,
 		"system": []map[string]any{{
 			"type": "text", "text": systemPrompt,
 			"cache_control": map[string]string{"type": "ephemeral"},
