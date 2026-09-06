@@ -28,7 +28,14 @@
       };
     in
     {
-      packages = forAll (pkgs: { default = package pkgs; });
+      packages = forAll (pkgs: {
+        default = package pkgs;
+        llama-server = pkgs.writeShellApplication {
+          name = "diane-llama-server";
+          runtimeInputs = [ (pkgs.llama-cpp.override { vulkanSupport = true; }) ];
+          text = builtins.readFile ./serve-llm.sh;
+        };
+      });
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
