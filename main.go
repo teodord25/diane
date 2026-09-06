@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 )
@@ -275,6 +276,35 @@ func main() {
 // stdin; voice mode records an utterance per turn.
 func anton(cfg Config, v Vault, once string, voice, quiet bool) {
 	var history []Message
+	if once == "" {
+		// A conversation syncs on the way in and on the way out, not four
+		// times a turn. Between those two points the vault is local: another
+		// machine's captures will not appear mid-conversation, and the
+		// commits made here sit unpushed until the exit sync. Nothing is
+		// lost if that never happens; they are committed, and the next
+		// command pushes them.
+		if err := v.syncNow(); err != nil {
+			warn("%v", err)
+		}
+		v.Deferred = true
+		defer func() {
+			if err := v.syncNow(); err != nil {
+				warn("%v", err)
+			}
+		}()
+		// Ctrl-C is the normal way out of the voice loop, so it has to run
+		// the exit sync too. os.Exit skips defers, hence the explicit call.
+		sigint := make(chan os.Signal, 1)
+		signal.Notify(sigint, os.Interrupt)
+		go func() {
+			<-sigint
+			if err := v.syncNow(); err != nil {
+				warn("%v", err)
+			}
+			fmt.Println()
+			os.Exit(0)
+		}()
+	}
 	say := func(utterance string) {
 		reply, err := turn(cfg, v, &history, utterance)
 		if err != nil {

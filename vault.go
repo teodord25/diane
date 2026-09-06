@@ -43,7 +43,14 @@ const (
 
 var textExts = map[string]bool{".md": true, ".txt": true, ".org": true}
 
-type Vault struct{ Root string }
+type Vault struct {
+	Root string
+	// Deferred suppresses the pull and push inside every command, leaving
+	// commits local. A long conversation sets it so it is not paying for
+	// four round trips to the remote per turn; see anton() for the entry
+	// and exit syncs that make that safe.
+	Deferred bool
+}
 
 type File struct{ Path, Content string }
 
@@ -112,9 +119,13 @@ func (v Vault) save(msg string) error {
 }
 
 // sync rebases local commits onto the remote and pushes. No remote configured
-// means a purely local vault, which is fine. A rebase that conflicts is aborted
+// means a purely local vault, which is fine. Deferred makes it do nothing;
+// syncNow ignores that, and is how a deferred session syncs on purpose. A rebase that conflicts is aborted
 // so the clone is never left half-merged; the local commits are kept.
 func (v Vault) sync() error {
+	if v.Deferred {
+		return nil
+	}
 	if _, err := v.git("remote", "get-url", "origin"); err != nil {
 		return nil
 	}
@@ -127,6 +138,9 @@ func (v Vault) sync() error {
 	}
 	return nil
 }
+
+// syncNow syncs even in a deferred session.
+func (v Vault) syncNow() error { v.Deferred = false; return v.locked(v.sync) }
 
 // brief keeps git's first real line and drops its paragraphs of hints.
 func brief(out string) string {
