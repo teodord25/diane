@@ -358,7 +358,11 @@ func (v Vault) apply(snapshot []File, r *Reply, msg string) (int, error) {
 				warn("skipping delete of %s: it changed since it was read", rel)
 				continue
 			}
-			if err := os.Remove(v.path(rel)); err != nil && !os.IsNotExist(err) {
+			if rel == inboxFile { // the inbox is emptied, never removed; gather expects it
+				if err := v.write(rel, nil); err != nil {
+					return err
+				}
+			} else if err := os.Remove(v.path(rel)); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 			n++

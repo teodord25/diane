@@ -68,6 +68,103 @@ func loadConfig() Config {
 	}
 }
 
+const usage = `diane - a plain-text note vault in a git repo, and Anton, the
+secretary who works inside it.
+
+CAPTURE                       fast, offline, never touches the model
+
+  diane drop <text>           capture a note. Also reads stdin, so
+                              wl-paste | diane drop drops the clipboard.
+  diane dictate               record until you stop talking, transcribe
+                              locally with whisper, capture the text.
+  diane photo <file> [caption]
+                              copy an image into media/ and capture a line
+                              pointing at it.
+
+Each capture is written as its own file under drops/, committed, and pushed.
+Its own file because git conflicts when two clones edit the same file: this
+way your laptop and your PC can both capture while apart, with nothing
+running, and never collide.
+
+PROCESS
+
+  diane gather                pull, fold everything in drops/ into raw.md and
+                              inbox.md, delete the drops, push. Appends each
+                              URL's page title as it goes, so a link you
+                              dropped last week is readable without opening
+                              it. Anton runs this before every turn, so you
+                              rarely need it by hand.
+
+  diane anton                 talk to Anton. Types by default: one line in,
+                              one reply out.
+       -v                     listen on the microphone instead, in a loop.
+       -q                     print replies instead of speaking them.
+       -t "..."               handle one utterance and exit. Good for scripts
+                              and keybinds.
+
+Each turn sends the whole vault plus your utterance to the model, which
+returns what to say and which files to rewrite in full. diane applies that,
+commits, pushes. Anton can never see or write raw.md, so a bad generation
+can lose an edit but never a capture.
+
+  diane serve                 HTTP endpoint for the phone, plus a one-page
+                              browser UI. POST /drop, POST /photo,
+                              GET /inbox, GET /?token=<token> for the page.
+                              Needs DIANE_TOKEN. Run it wherever is on when
+                              you reach for your phone.
+
+SYNC
+
+The vault is a git repo, so the machines talk through your remote, not to
+each other. Every command pulls before it reads and pushes after it writes.
+An offline push is not an error; the next command carries it.
+
+The one way to get a conflict: run gather or anton on two machines without a
+sync in between, since both rewrite inbox.md. diane aborts the rebase, keeps
+your commits, and tells you to run git pull --rebase in the vault.
+
+ENVIRONMENT
+
+  DIANE_VAULT        the git clone holding your notes
+  DIANE_BACKEND      local (any OpenAI-compatible server) or anthropic
+  DIANE_LLM_URL      where the local model server is. Point this at another
+                     machine to run the model on your PC and the interface
+                     on your laptop.
+  DIANE_LLM_MODEL    model name sent to that server
+  DIANE_CLAUDE_MODEL, ANTHROPIC_API_KEY   used when DIANE_BACKEND=anthropic
+  DIANE_TOKEN        shared secret for serve. Same on every device.
+  DIANE_ADDR         what serve listens on
+  DIANE_SILENCE      seconds of silence that end a dictated utterance
+  DIANE_WHISPER_BIN, DIANE_WHISPER_MODEL, DIANE_THREADS      speech in
+  DIANE_TTS_BIN, DIANE_VOICE, DIANE_PLAY_BIN, DIANE_REC_BIN  speech out
+
+The README covers the phone shortcuts, the NixOS module and the setup.`
+
+// help prints the usage plus what this machine is actually configured to do,
+// which is the question you have when a command misbehaves.
+func help(cfg Config) {
+	fmt.Println(usage)
+	fmt.Printf(`
+IN EFFECT HERE
+
+  vault      %s
+  backend    %s
+  model      %s
+  voice      %s
+`, cfg.Vault, cfg.Backend, modelDesc(cfg), cfg.TTSBin+" "+cfg.Voice)
+}
+
+func modelDesc(cfg Config) string {
+	if cfg.Backend == "anthropic" {
+		key := "ANTHROPIC_API_KEY set"
+		if cfg.APIKey == "" {
+			key = "ANTHROPIC_API_KEY MISSING"
+		}
+		return cfg.ClaudeModel + " (" + key + ")"
+	}
+	return cfg.LLMModel + " at " + cfg.LLMURL
+}
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -81,10 +178,15 @@ func die(format string, args ...any) { warn(format, args...); os.Exit(1) }
 
 func main() {
 	if len(os.Args) < 2 {
-		die("usage: diane drop|dictate|photo|gather|serve|anton")
+		fmt.Println(usage)
+		os.Exit(1)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	cfg := loadConfig()
+	if cmd == "help" || cmd == "-h" || cmd == "--help" {
+		help(cfg)
+		return
+	}
 	v, err := openVault(cfg.Vault)
 	if err != nil {
 		die("%v", err)
