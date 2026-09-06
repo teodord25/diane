@@ -167,7 +167,7 @@ func askLocal(cfg Config, files []File, history []Message, utterance string) (*R
 		"model":       cfg.LLMModel,
 		"messages":    msgs,
 		"temperature": 0,
-		"max_tokens":  2048,
+		"max_tokens":  4096,
 		"stream":      false,
 		// Constrains llama-server to valid JSON. parseReply still guards
 		// against servers that ignore it.

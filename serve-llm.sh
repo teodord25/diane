@@ -9,4 +9,5 @@ exec llama-server \
   -ngl 999 \
   --host "${DIANE_LLM_HOST:-127.0.0.1}" \
   --port "${DIANE_LLM_PORT:-8080}" \
-  --jinja --no-webui
+  --reasoning-budget 0 \
+  --jinja --no-webui "$@"
