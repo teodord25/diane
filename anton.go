@@ -37,6 +37,9 @@ Reply with a single JSON object and nothing else. No prose, no code fence.
 Rules:
 
 - "speak" is required. Always say something, even if only "Done."
+- "speak" must stand alone. Never end it with a colon or a promise of content
+  that only exists in a file — if you were asked to produce something, say it
+  in "speak" as well as writing it.
 - "writes" replaces a file's entire contents. Include every line you intend to
   keep, not just the changed ones. Omit files you are not changing. Use an empty
   list when you are changing nothing.
