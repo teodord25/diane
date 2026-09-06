@@ -294,7 +294,11 @@ func main() {
 		text := fs.String("t", "", "handle this one utterance and exit")
 		voice := fs.Bool("v", false, "listen on the microphone instead of reading stdin")
 		quiet := fs.Bool("q", false, "print replies instead of speaking them")
+		useSmart := fs.Bool("s", false, "use the smart model for the whole session")
 		fs.Parse(args)
+		if *useSmart {
+			cfg = smart(cfg)
+		}
 		if cfg.Backend == "anthropic" && cfg.APIKey == "" {
 			die("DIANE_BACKEND=anthropic but ANTHROPIC_API_KEY is not set")
 		}
@@ -305,14 +309,10 @@ func main() {
 	}
 }
 
-// route sends an utterance prefixed with "!" to the smart backend instead of
-// the everyday one: a bigger, slower model for the turns worth waiting for.
-// It changes only this turn; the next one is back to the fast model.
-func route(cfg Config, utterance string) (Config, string) {
-	rest, ok := strings.CutPrefix(utterance, "!")
-	if !ok {
-		return cfg, utterance
-	}
+// smart points cfg at the smart backend: a bigger, slower model for the turns
+// worth waiting for. Used for one turn by the "!" prefix, or for a whole
+// session by -s.
+func smart(cfg Config) Config {
 	switch {
 	case cfg.SmartURL == "":
 		warn("DIANE_SMART_URL is not set; using the everyday model")
@@ -321,7 +321,16 @@ func route(cfg Config, utterance string) (Config, string) {
 	default:
 		cfg.Backend, cfg.LLMURL, cfg.LLMModel = "local", cfg.SmartURL, cfg.SmartModel
 	}
-	return cfg, strings.TrimSpace(rest)
+	return cfg
+}
+
+// route sends an utterance prefixed with "!" to the smart backend. It changes
+// only this turn; the next one is back to whatever the session started as.
+func route(cfg Config, utterance string) (Config, string) {
+	if rest, ok := strings.CutPrefix(utterance, "!"); ok {
+		return smart(cfg), strings.TrimSpace(rest)
+	}
+	return cfg, utterance
 }
 
 // anton runs the conversation loop. Typed mode reads a line per turn from
