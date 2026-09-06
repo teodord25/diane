@@ -178,7 +178,7 @@ func modelDesc(cfg Config) string {
 		}
 		return cfg.ClaudeModel + " (" + key + ")"
 	}
-	return cfg.LLMModel + " at " + cfg.LLMURL
+	return loaded(cfg) + " at " + cfg.LLMURL
 }
 
 // number parses an integer from the environment.
@@ -354,7 +354,7 @@ func anton(cfg Config, v Vault, once string, voice, quiet bool) {
 		say(once)
 		return
 	}
-	warn("vault %s, backend %s", v.Root, cfg.Backend)
+	warn("vault %s, model %s", v.Root, loaded(cfg))
 	if voice {
 		for {
 			warn("-- listening --")

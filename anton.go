@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
+	"time"
 )
 
 // Anton is the secretary. Every turn he is shown the whole vault and one
@@ -106,6 +108,32 @@ func ask(cfg Config, files []File, history []Message, utterance string) (*Reply,
 		return askAnthropic(cfg, files, history, utterance)
 	}
 	return nil, fmt.Errorf("DIANE_BACKEND=%q, want local or anthropic", cfg.Backend)
+}
+
+// loaded asks the local server which model it actually has open. The
+// configured name is only a label, and which model is running is decided
+// outside diane, so this is the only honest answer to "which model is this".
+func loaded(cfg Config) string {
+	if cfg.Backend == "anthropic" {
+		return cfg.ClaudeModel
+	}
+	base, ok := strings.CutSuffix(cfg.LLMURL, "/chat/completions")
+	if !ok {
+		return cfg.LLMModel
+	}
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(base + "/models")
+	if err != nil {
+		return cfg.LLMModel + " (server unreachable)"
+	}
+	defer resp.Body.Close()
+	var parsed struct {
+		Data []struct{ ID string } `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&parsed) != nil || len(parsed.Data) == 0 {
+		return cfg.LLMModel
+	}
+	// llama-server reports the model's path; the file name is the useful part.
+	return path.Base(parsed.Data[0].ID)
 }
 
 // prompt renders the whole vault plus the utterance, identically for both backends.
