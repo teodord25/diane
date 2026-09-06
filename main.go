@@ -33,14 +33,17 @@ type Config struct {
 	Token string // serve: shared secret for the phone and the page
 	Addr  string // serve: listen address
 
-	Backend    string // "local" or "anthropic"
-	LLMURL     string // local: OpenAI-compatible chat endpoint
-	LLMModel   string // local: model name to request, mostly cosmetic
-	SmartURL   string // where a "!" utterance goes instead: another
-	SmartModel string // OpenAI-compatible server, or the word "anthropic"
-	Timeout    time.Duration
-	MaxTokens  int // ceiling per reply. A thinking model needs room for the
-	//                 reasoning as well as the answer.
+	Backend  string // "local" or "anthropic"
+	LLMURL   string // local: OpenAI-compatible chat endpoint
+	LLMModel string // local: model name to request, mostly cosmetic
+
+	// Timeout is how long to wait for a reply: a model running mostly in
+	// system RAM answers in minutes, not seconds. MaxTokens is the ceiling
+	// per reply, which has to cover a thinking model's reasoning as well as
+	// its answer.
+	Timeout   time.Duration
+	MaxTokens int
+
 	ClaudeModel  string // anthropic
 	APIKey       string // anthropic
 	RecBin       string
@@ -63,8 +66,6 @@ func loadConfig() Config {
 		Backend:      env("DIANE_BACKEND", "local"),
 		LLMURL:       env("DIANE_LLM_URL", "http://127.0.0.1:8080/v1/chat/completions"),
 		LLMModel:     env("DIANE_LLM_MODEL", "gemma-4-12b-it-qat"),
-		SmartURL:     os.Getenv("DIANE_SMART_URL"),
-		SmartModel:   env("DIANE_SMART_MODEL", "glm-5.2"),
 		Timeout:      duration("DIANE_TIMEOUT", 30*time.Minute),
 		MaxTokens:    number("DIANE_MAX_TOKENS", 16384),
 		ClaudeModel:  env("DIANE_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
@@ -143,9 +144,6 @@ ENVIRONMENT
                      machine to run the model on your PC and the interface
                      on your laptop.
   DIANE_LLM_MODEL    model name sent to that server
-  DIANE_SMART_URL    where a ! utterance goes: another OpenAI-compatible
-                     server, or the word anthropic
-  DIANE_SMART_MODEL  model name sent to that server
   DIANE_TIMEOUT      how long to wait for a reply, e.g. 30m
   DIANE_MAX_TOKENS   ceiling per reply; a thinking model needs room for the
                      reasoning as well as the answer
@@ -294,11 +292,7 @@ func main() {
 		text := fs.String("t", "", "handle this one utterance and exit")
 		voice := fs.Bool("v", false, "listen on the microphone instead of reading stdin")
 		quiet := fs.Bool("q", false, "print replies instead of speaking them")
-		useSmart := fs.Bool("s", false, "use the smart model for the whole session")
 		fs.Parse(args)
-		if *useSmart {
-			cfg = smart(cfg)
-		}
 		if cfg.Backend == "anthropic" && cfg.APIKey == "" {
 			die("DIANE_BACKEND=anthropic but ANTHROPIC_API_KEY is not set")
 		}
@@ -307,30 +301,6 @@ func main() {
 	default:
 		die("unknown command %q", cmd)
 	}
-}
-
-// smart points cfg at the smart backend: a bigger, slower model for the turns
-// worth waiting for. Used for one turn by the "!" prefix, or for a whole
-// session by -s.
-func smart(cfg Config) Config {
-	switch {
-	case cfg.SmartURL == "":
-		warn("DIANE_SMART_URL is not set; using the everyday model")
-	case cfg.SmartURL == "anthropic":
-		cfg.Backend = "anthropic"
-	default:
-		cfg.Backend, cfg.LLMURL, cfg.LLMModel = "local", cfg.SmartURL, cfg.SmartModel
-	}
-	return cfg
-}
-
-// route sends an utterance prefixed with "!" to the smart backend. It changes
-// only this turn; the next one is back to whatever the session started as.
-func route(cfg Config, utterance string) (Config, string) {
-	if rest, ok := strings.CutPrefix(utterance, "!"); ok {
-		return smart(cfg), strings.TrimSpace(rest)
-	}
-	return cfg, utterance
 }
 
 // anton runs the conversation loop. Typed mode reads a line per turn from
@@ -367,7 +337,6 @@ func anton(cfg Config, v Vault, once string, voice, quiet bool) {
 		}()
 	}
 	say := func(utterance string) {
-		cfg, utterance := route(cfg, utterance)
 		reply, err := turn(cfg, v, &history, utterance)
 		if err != nil {
 			warn("%v", err)
