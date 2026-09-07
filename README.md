@@ -150,10 +150,26 @@ at gather rather than at capture so a slow site can't slow a drop.
 ## Anton
 
 One model call per turn: the whole vault goes in the prompt, the model returns
-`{"speak", "writes", "deletes"}` with full-file replacements, diane applies
-them under the vault lock, commits, pushes. No tool loop, no agent framework.
+`{"speak", "edits", "deletes"}`, diane applies them under the vault lock,
+commits, pushes. No tool loop, no agent framework.
 
-A write to a file that changed on disk since the model read it (a gather ran,
+An edit is `{path, search, replace}`: `search` must match the file in exactly
+one place, an empty `search` appends, an empty `replace` deletes what it
+matched. Edits rather than whole new file contents because a model asked to
+re-emit a 250-line file will quietly emit a shortened one when it runs out of
+room — with an edit, a truncated reply produces a `search` that does not
+match, and it is refused loudly instead.
+
+Every file is shown to the model with a line number before each line, and a
+move is `{from, lines, to}`: those lines are cut from one file and appended to
+another. Sorting a 250-link list into topics is then a handful of moves, one
+per topic, instead of hundreds of retyped edits — deciding where a line goes
+needs a model, cutting and pasting it does not.
+
+Refused as a set: if any edit or move fails, none are applied. Half of a
+"move these links from A to B" is either a duplicate or a loss.
+
+An edit to a file that changed on disk since the model read it (a gather ran,
 a sync pulled) is skipped with a warning: Anton's edit can be redone by
 asking again, a note buried under it could not.
 

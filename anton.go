@@ -31,23 +31,53 @@ Reply with a single JSON object and nothing else. No prose, no code fence.
 
 {
   "speak":   "what to say out loud",
-  "writes":  [{"path": "todo.md", "content": "the complete new contents of that file"}],
+  "edits":   [{"path": "todo.md", "search": "- old text", "replace": "- new text"}],
+  "moves":   [{"from": "inbox.md", "lines": [3, 7, 12], "to": "topics/games.md"}],
   "deletes": ["obsolete.md"]
 }
+
+Every file in the vault is shown to you with a line number before each line.
+The numbers are not part of the file; they are how you point at a line.
+
+Filing and sorting:
+
+- To move whole lines from one file to another, use "moves". Give the line
+  numbers as shown, and they are cut from "from" and appended to "to". The
+  destination file is created if it does not exist.
+- Prefer a move over an edit whenever you are relocating a line unchanged.
+  Sorting a long list into topics is a handful of moves, one per topic, not
+  hundreds of edits.
+- Line numbers refer to the files exactly as shown to you. Do not renumber as
+  you go; every move is resolved against what you were given.
+- Use an edit, not a move, when the text itself has to change.
+
+Editing:
+
+- Each edit changes one file in one place. "search" must be text that appears
+  in that file exactly once, copied character for character. "replace" is what
+  it becomes.
+- To add to the end of a file, or to create a file, use an empty "search" and
+  put the new text in "replace".
+- To remove something, put the text in "search" and leave "replace" empty.
+- Several edits may touch the same file; they are applied in the order given.
+- Never quote a whole file in "search" when a single line identifies the place.
+- If any edit or move fails, none of them are applied, so make every "search"
+  exact and every line number one you were actually shown.
 
 Rules:
 
 - "speak" is required. Always say something, even if only "Done."
-- "writes" replaces a file's entire contents. Include every line you intend to
-  keep, not just the changed ones. Omit files you are not changing. Use an empty
-  list when you are changing nothing.
+- "speak" must stand alone. Never end it with a colon or a promise of content
+  that only exists in a file: if you were asked to produce something, say it in
+  "speak" as well as writing it.
+- Use empty lists when you are changing nothing.
 - Paths are relative to the vault root, must stay inside it, and must end in
   .md, .txt or .org.
 - "speak" is fed to a speech synthesiser. Plain spoken prose only: no markdown,
   no asterisks, no hyphens as bullets, no backticks, no URLs, no file paths.
   Write list positions as words: "one", "two", "three".
 - Be brief. One or two sentences, unless you are reading a list back.
-- If the person only asked a question, answer it and write nothing.
+- If the person only asked a question, answer it and change nothing.
 - Preserve the vault's existing formatting and file layout. Do not tidy,
   reorganise or rename anything unless you were asked to.
 - Prefer adding to an existing file over creating a new one.`
@@ -57,14 +87,38 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-type Write struct {
+// An Edit replaces one exact stretch of text in one file. Search must match
+// the file in exactly one place; an empty Search appends instead, creating the
+// file if it does not exist, and an empty Replace deletes what it matched.
+//
+// Edits rather than whole new file contents because a model asked to re-emit a
+// 250-line file will quietly emit a shortened one when it runs out of room.
+// With an edit, a truncated reply produces a Search that does not match, and
+// apply refuses it loudly instead of writing seven lines over two hundred.
+type Edit struct {
 	Path    string `json:"path"`
-	Content string `json:"content"`
+	Search  string `json:"search"`
+	Replace string `json:"replace"`
+}
+
+// A Move takes whole lines out of one file and appends them to another,
+// naming them by the line numbers shown in the prompt.
+//
+// This exists because filing a long list is two jobs: deciding where each line
+// belongs, which needs a model, and cutting and pasting it, which does not.
+// An Edit makes the model retype every line it moves, so a hundred lines is
+// thousands of tokens of exact transcription and one typo away from failing.
+// A Move is a list of integers.
+type Move struct {
+	From  string `json:"from"`
+	Lines []int  `json:"lines"`
+	To    string `json:"to"`
 }
 
 type Reply struct {
 	Speak   string   `json:"speak"`
-	Writes  []Write  `json:"writes"`
+	Edits   []Edit   `json:"edits"`
+	Moves   []Move   `json:"moves"`
 	Deletes []string `json:"deletes"`
 }
 
@@ -92,9 +146,13 @@ func turn(cfg Config, v Vault, history *[]Message, utterance string) (string, er
 	if len(*history) > 8 {
 		*history = (*history)[len(*history)-8:]
 	}
-	if n, err := v.apply(files, reply, utterance); err != nil {
-		return "", fmt.Errorf("apply: %w", err)
-	} else if n > 0 {
+	// An edit that will not apply makes whatever anton just said untrue, so
+	// say that instead of letting the claim stand.
+	n, err := v.apply(files, reply, utterance)
+	switch {
+	case err != nil:
+		return "I could not make that change. " + err.Error(), nil
+	case n > 0:
 		warn("%d file(s) changed", n)
 	}
 	return reply.Speak, nil
@@ -141,7 +199,13 @@ func prompt(files []File, utterance string) string {
 	var b strings.Builder
 	b.WriteString("<vault>\n")
 	for _, f := range files {
-		fmt.Fprintf(&b, "<file path=%q>\n%s\n</file>\n", f.Path, f.Content)
+		fmt.Fprintf(&b, "<file path=%q>\n", f.Path)
+		// Numbered, because a move refers to lines by number. The numbers are
+		// not part of the file; they are how the model points at it.
+		for i, line := range lines(f.Content) {
+			fmt.Fprintf(&b, "%d\t%s\n", i+1, line)
+		}
+		b.WriteString("</file>\n")
 	}
 	if len(files) == 0 {
 		b.WriteString("(the vault is empty)\n")

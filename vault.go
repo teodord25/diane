@@ -329,7 +329,29 @@ func safePath(rel string) (string, error) {
 	return clean, nil
 }
 
-// apply writes the model's full-file replacements and deletions, then saves.
+// lines splits a file into its lines, without a phantom empty last line for
+// the trailing newline. Line n in the prompt is lines(content)[n-1].
+func lines(content string) []string {
+	if content == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+}
+
+func join(ls []string) string {
+	if len(ls) == 0 {
+		return ""
+	}
+	return strings.Join(ls, "\n") + "\n"
+}
+
+// apply makes the model's edits, moves and deletions, then saves.
+//
+// All or nothing: every edit is resolved against the snapshot first, and if
+// any of them fails to match, nothing is written. Half of a "move these links
+// from A to B" is either a duplicate or a loss, and a loss is unacceptable in
+// a note vault, so a reply that does not fully apply does not apply at all.
+//
 // A file that changed on disk since the snapshot was taken (a gather ran, a
 // sync pulled) is skipped rather than overwritten: anton's edit can be redone
 // by asking again, a note lost under it cannot.
@@ -338,38 +360,117 @@ func (v Vault) apply(snapshot []File, r *Reply, msg string) (int, error) {
 	for _, f := range snapshot {
 		before[f.Path] = f.Content
 	}
-	unchanged := func(rel string) bool {
-		cur, _ := os.ReadFile(v.path(rel))
-		return string(cur) == before[rel]
+
+	// Resolve every edit against the snapshot, in order, so several edits to
+	// one file compose. Nothing touches the disk until they all succeed.
+	after := map[string]string{}
+	current := func(rel string) string {
+		if text, ok := after[rel]; ok {
+			return text
+		}
+		return before[rel]
+	}
+	for _, e := range r.Edits {
+		rel, err := safePath(e.Path)
+		if err != nil {
+			return 0, err
+		}
+		text := current(rel)
+		switch {
+		case e.Search == "": // append, creating the file if it does not exist
+			if text != "" && !strings.HasSuffix(text, "\n") {
+				text += "\n"
+			}
+			after[rel] = text + e.Replace
+		case strings.Count(text, e.Search) == 1:
+			after[rel] = strings.Replace(text, e.Search, e.Replace, 1)
+		case !strings.Contains(text, e.Search):
+			return 0, fmt.Errorf("no line in %s matches %q", rel, truncate(e.Search, 60))
+		default:
+			return 0, fmt.Errorf("%q appears more than once in %s; it has to match one place exactly",
+				truncate(e.Search, 60), rel)
+		}
+	}
+
+	// Moves are resolved against the snapshot, never against the result of an
+	// earlier move: the line numbers the model was given describe the files as
+	// they were shown to it. Cuts from one file therefore accumulate across
+	// every move that takes from it, which is the normal case when a list is
+	// being sorted into several topics at once.
+	cut := map[string]map[int]bool{}
+	for _, m := range r.Moves {
+		from, err := safePath(m.From)
+		if err != nil {
+			return 0, err
+		}
+		to, err := safePath(m.To)
+		if err != nil {
+			return 0, err
+		}
+		if from == to {
+			return 0, fmt.Errorf("move from %s to itself", from)
+		}
+		src := lines(before[from])
+		if cut[from] == nil {
+			cut[from] = map[int]bool{}
+		}
+		var taken []string
+		for _, n := range m.Lines {
+			switch {
+			case n < 1 || n > len(src):
+				return 0, fmt.Errorf("%s has %d lines; there is no line %d", from, len(src), n)
+			case cut[from][n]:
+				return 0, fmt.Errorf("%s line %d is moved twice", from, n)
+			}
+			cut[from][n] = true
+			taken = append(taken, src[n-1])
+		}
+		after[to] = join(append(lines(current(to)), taken...))
+	}
+	// Now that every cut is known, rebuild each source once.
+	for from, gone := range cut {
+		var kept []string
+		for i, l := range lines(before[from]) {
+			if !gone[i+1] {
+				kept = append(kept, l)
+			}
+		}
+		after[from] = join(kept)
+	}
+
+	deletes := make([]string, 0, len(r.Deletes))
+	for _, d := range r.Deletes {
+		rel, err := safePath(d)
+		if err != nil {
+			return 0, err
+		}
+		deletes = append(deletes, rel)
 	}
 
 	n := 0
 	err := v.locked(func() error {
-		for _, w := range r.Writes {
-			rel, err := safePath(w.Path)
-			if err != nil {
-				return err
+		changed := func(rel string) bool {
+			cur, _ := os.ReadFile(v.path(rel))
+			if string(cur) == before[rel] {
+				return false
 			}
-			if !unchanged(rel) {
-				warn("skipping write to %s: it changed since it was read", rel)
+			warn("skipping %s: it changed since it was read", rel)
+			return true
+		}
+		for rel, text := range after {
+			if changed(rel) {
 				continue
 			}
-			body := w.Content
-			if body != "" && !strings.HasSuffix(body, "\n") {
-				body += "\n"
+			if text != "" && !strings.HasSuffix(text, "\n") {
+				text += "\n"
 			}
-			if err := v.write(rel, []byte(body)); err != nil {
+			if err := v.write(rel, []byte(text)); err != nil {
 				return err
 			}
 			n++
 		}
-		for _, d := range r.Deletes {
-			rel, err := safePath(d)
-			if err != nil {
-				return err
-			}
-			if !unchanged(rel) {
-				warn("skipping delete of %s: it changed since it was read", rel)
+		for _, rel := range deletes {
+			if changed(rel) {
 				continue
 			}
 			if rel == inboxFile { // the inbox is emptied, never removed; gather expects it
