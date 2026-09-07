@@ -222,6 +222,23 @@ func TestApplyRejectsBadMoves(t *testing.T) {
 	}
 }
 
+// Models copy the prompt's line numbers back into search strings despite the
+// instruction not to; the edit should still land.
+func TestApplyStripsLeakedLineNumbers(t *testing.T) {
+	v := clones(t, 1)[0]
+	v.write("tabs.md", []byte("about:blank\tabout:blank\n- two\n"))
+	files, _ := v.load()
+	r := &Reply{Edits: []Edit{
+		{Path: "tabs.md", Search: "1| about:blank\tabout:blank", Replace: "- one"},
+	}}
+	if _, err := v.apply(files, r, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, v, "tabs.md"); got != "- one\n- two\n" {
+		t.Errorf("tabs.md = %q", got)
+	}
+}
+
 func TestLines(t *testing.T) {
 	for in, want := range map[string][]string{
 		"":         nil,

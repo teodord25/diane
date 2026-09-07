@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -329,6 +330,11 @@ func safePath(rel string) (string, error) {
 	return clean, nil
 }
 
+// gutter matches the "N| " line numbers the prompt puts in front of every
+// line. Models copy them back despite being told not to, so strip them rather
+// than fail an edit that was otherwise correct.
+var gutter = regexp.MustCompile(`(?m)^\d+\| `)
+
 // lines splits a file into its lines, without a phantom empty last line for
 // the trailing newline. Line n in the prompt is lines(content)[n-1].
 func lines(content string) []string {
@@ -375,20 +381,20 @@ func (v Vault) apply(snapshot []File, r *Reply, msg string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		text := current(rel)
+		text, search := current(rel), gutter.ReplaceAllString(e.Search, "")
 		switch {
 		case e.Search == "": // append, creating the file if it does not exist
 			if text != "" && !strings.HasSuffix(text, "\n") {
 				text += "\n"
 			}
 			after[rel] = text + e.Replace
-		case strings.Count(text, e.Search) == 1:
-			after[rel] = strings.Replace(text, e.Search, e.Replace, 1)
-		case !strings.Contains(text, e.Search):
-			return 0, fmt.Errorf("no line in %s matches %q", rel, truncate(e.Search, 60))
+		case strings.Count(text, search) == 1:
+			after[rel] = strings.Replace(text, search, gutter.ReplaceAllString(e.Replace, ""), 1)
+		case !strings.Contains(text, search):
+			return 0, fmt.Errorf("no line in %s matches %q", rel, truncate(search, 60))
 		default:
 			return 0, fmt.Errorf("%q appears more than once in %s; it has to match one place exactly",
-				truncate(e.Search, 60), rel)
+				truncate(search, 60), rel)
 		}
 	}
 

@@ -36,20 +36,25 @@ Reply with a single JSON object and nothing else. No prose, no code fence.
   "deletes": ["obsolete.md"]
 }
 
-Every file in the vault is shown to you with a line number before each line.
-The numbers are not part of the file; they are how you point at a line.
+Every file is shown to you as "N| text", where N is a line number. The number
+and the "| " are NOT part of the file. Never copy them into an edit.
 
 Filing and sorting:
 
-- To move whole lines from one file to another, use "moves". Give the line
-  numbers as shown, and they are cut from "from" and appended to "to". The
-  destination file is created if it does not exist.
-- Prefer a move over an edit whenever you are relocating a line unchanged.
-  Sorting a long list into topics is a handful of moves, one per topic, not
-  hundreds of edits.
+- Moving lines between files is what "moves" is for. NEVER use edits to
+  relocate a line. Sorting a list into topics is one move per topic, each
+  naming its line numbers - not one edit per line.
+- The lines are cut from "from" and appended to "to", which is created if it
+  does not exist. You do not retype the lines; you name their numbers.
 - Line numbers refer to the files exactly as shown to you. Do not renumber as
   you go; every move is resolved against what you were given.
-- Use an edit, not a move, when the text itself has to change.
+- Use an edit only when the text itself has to change.
+
+For example, to sort a list of links into topics:
+
+{"speak": "Sorted into two topics.",
+ "moves": [{"from": "links.md", "lines": [1, 4, 9], "to": "topics/games.md"},
+           {"from": "links.md", "lines": [2, 3], "to": "topics/music.md"}]}
 
 Editing:
 
@@ -77,7 +82,8 @@ Rules:
   no asterisks, no hyphens as bullets, no backticks, no URLs, no file paths.
   Write list positions as words: "one", "two", "three".
 - Be brief. One or two sentences, unless you are reading a list back.
-- If the person only asked a question, answer it and change nothing.
+- If the person only asked a question, or asked you to propose or suggest
+  something, answer it and change nothing. Proposing is not doing.
 - Preserve the vault's existing formatting and file layout. Do not tidy,
   reorganise or rename anything unless you were asked to.
 - Prefer adding to an existing file over creating a new one.`
@@ -202,8 +208,10 @@ func prompt(files []File, utterance string) string {
 		fmt.Fprintf(&b, "<file path=%q>\n", f.Path)
 		// Numbered, because a move refers to lines by number. The numbers are
 		// not part of the file; they are how the model points at it.
+		// "| " rather than a tab: the files themselves often contain tabs, and
+		// a model cannot tell a gutter from a column.
 		for i, line := range lines(f.Content) {
-			fmt.Fprintf(&b, "%d\t%s\n", i+1, line)
+			fmt.Fprintf(&b, "%d| %s\n", i+1, line)
 		}
 		b.WriteString("</file>\n")
 	}
