@@ -1,379 +1,655 @@
-// diane is a plain-text note vault that lives in a git repository, with a
-// secretary, Anton, who works inside it.
+// diane — append-only note capture over a git-synced vault.
 //
-//	diane drop <text>      capture a note (or pipe it in)
-//	diane dictate          capture from the microphone
-//	diane photo <file>     capture an image, e.g. a notebook page
-//	diane gather           fold new captures into raw.md and inbox.md
-//	diane serve            HTTP endpoints for the phone, and a one-page UI
-//	diane anton            talk to Anton: typed by default, -v for voice, -t for one-shot
+// Subcommands: drop, gather, serve, help.
+// No dependencies outside the standard library.
 //
-// Every machine holds a clone of the vault. Commands pull before they read
-// and push after they write, so the clones stay level through the remote and
-// nothing needs to be running for that to work. See vault.go for the layout.
+// Vault layout:
+//
+//	raw.md    append-only log; nothing ever edits it
+//	inbox.md  working file; agents and humans may rewrite it
+//	drops/    one file per capture, folded in by `gather`
+//	media/    photos moved out of drops/ by `gather`
 package main
 
 import (
-	"bufio"
-	"flag"
+	"bytes"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"html"
 	"io"
+	"net/http"
 	"os"
-	"os/signal"
+	"os/exec"
 	"path/filepath"
-	"strconv"
+	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
-// Config comes entirely from the environment, so the Nix module, the
-// devshell and a shell rc can all set it without touching the code.
-type Config struct {
-	Vault string
-	Token string // serve: shared secret for the phone and the page
-	Addr  string // serve: listen address
+const usage = `diane — append-only note capture over a git-synced vault
 
-	Backend  string // "local" or "anthropic"
-	LLMURL   string // local: OpenAI-compatible chat endpoint
-	LLMModel string // local: model name to request, mostly cosmetic
+USAGE
+  diane drop [text...]        capture text (or --file PATH, or stdin)
+  diane gather                fold drops/ into raw.md + inbox.md
+  diane serve                 HTTP capture endpoint + textbox page
+  diane help                  this text
 
-	// Timeout is how long to wait for a reply: a model running mostly in
-	// system RAM answers in minutes, not seconds. MaxTokens is the ceiling
-	// per reply, which has to cover a thinking model's reasoning as well as
-	// its answer.
-	Timeout   time.Duration
-	MaxTokens int
-
-	ClaudeModel  string // anthropic
-	APIKey       string // anthropic
-	RecBin       string
-	Silence      string // seconds of silence that end an utterance
-	WhisperBin   string
-	WhisperModel string
-	Threads      string
-	TTSBin       string // `tts <out.wav> <text>`, voice in DIANE_VOICE
-	Voice        string
-	PlayBin      string
-}
-
-func loadConfig() Config {
-	home, _ := os.UserHomeDir()
-	share := filepath.Join(home, ".local", "share", "diane")
-	return Config{
-		Vault:        env("DIANE_VAULT", filepath.Join(home, "vault")),
-		Token:        os.Getenv("DIANE_TOKEN"),
-		Addr:         env("DIANE_ADDR", "0.0.0.0:7777"),
-		Backend:      env("DIANE_BACKEND", "local"),
-		LLMURL:       env("DIANE_LLM_URL", "http://127.0.0.1:8080/v1/chat/completions"),
-		LLMModel:     env("DIANE_LLM_MODEL", "gemma-4-12b-it-qat"),
-		Timeout:      duration("DIANE_TIMEOUT", 30*time.Minute),
-		MaxTokens:    number("DIANE_MAX_TOKENS", 16384),
-		ClaudeModel:  env("DIANE_CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
-		APIKey:       os.Getenv("ANTHROPIC_API_KEY"),
-		RecBin:       env("DIANE_REC_BIN", "rec"),
-		Silence:      env("DIANE_SILENCE", "2.0"),
-		WhisperBin:   env("DIANE_WHISPER_BIN", "whisper-cli"),
-		WhisperModel: env("DIANE_WHISPER_MODEL", filepath.Join(share, "ggml-base.en.bin")),
-		Threads:      env("DIANE_THREADS", "4"),
-		TTSBin:       env("DIANE_TTS_BIN", "piper-tts"),
-		Voice:        env("DIANE_VOICE", filepath.Join(share, "en_US-lessac-medium.onnx")),
-		PlayBin:      env("DIANE_PLAY_BIN", "aplay"),
-	}
-}
-
-const usage = `diane - a plain-text note vault in a git repo, and Anton, the
-secretary who works inside it.
-
-CAPTURE                       fast, offline, never touches the model
-
-  diane drop <text>           capture a note. Also reads stdin, so
-                              wl-paste | diane drop drops the clipboard.
-  diane dictate               record until you stop talking, transcribe
-                              locally with whisper, capture the text.
-  diane photo <file> [caption]
-                              copy an image into media/ and capture a line
-                              pointing at it.
-
-Each capture is written as its own file under drops/, committed, and pushed.
-Its own file because git conflicts when two clones edit the same file: this
-way your laptop and your PC can both capture while apart, with nothing
-running, and never collide.
-
-PROCESS
-
-  diane gather                pull, fold everything in drops/ into raw.md and
-                              inbox.md, delete the drops, push. Appends each
-                              URL's page title as it goes, so a link you
-                              dropped last week is readable without opening
-                              it. Anton runs this before every turn, so you
-                              rarely need it by hand.
-
-  diane anton                 talk to Anton. Types by default: one line in,
-                              one reply out.
-       -v                     listen on the microphone instead, in a loop.
-       -q                     print replies instead of speaking them.
-       -t "..."               handle one utterance and exit. Good for scripts
-                              and keybinds.
-
-Each turn sends the whole vault plus your utterance to the model, which
-returns what to say and which files to rewrite in full. diane applies that,
-commits, pushes. Anton can never see or write raw.md, so a bad generation
-can lose an edit but never a capture.
-
-  diane serve                 HTTP endpoint for the phone, plus a one-page
-                              browser UI. POST /drop, POST /photo,
-                              GET /inbox, GET /?token=<token> for the page.
-                              Needs DIANE_TOKEN. Run it wherever is on when
-                              you reach for your phone.
-
-SYNC
-
-The vault is a git repo, so the machines talk through your remote, not to
-each other. Every command pulls before it reads and pushes after it writes.
-An offline push is not an error; the next command carries it.
-
-The one way to get a conflict: run gather or anton on two machines without a
-sync in between, since both rewrite inbox.md. diane aborts the rebase, keeps
-your commits, and tells you to run git pull --rebase in the vault.
+DROP FLAGS
+  --file PATH                 capture the contents of PATH (repeatable)
 
 ENVIRONMENT
+  DIANE_VAULT     vault clone            (default ~/vault)
+  DIANE_ADDR      serve listen address   (default 127.0.0.1:7777)
+  DIANE_TOKEN     serve auth token       (required unless DIANE_OPEN=1)
+  DIANE_OPEN      set to 1 to serve without auth (localhost only)
+  DIANE_TIMEOUT   link title fetch timeout (default 10s)
+`
 
-  DIANE_VAULT        the git clone holding your notes
-  DIANE_BACKEND      local (any OpenAI-compatible server) or anthropic
-  DIANE_LLM_URL      where the local model server is. Point this at another
-                     machine to run the model on your PC and the interface
-                     on your laptop.
-  DIANE_LLM_MODEL    model name sent to that server
-  DIANE_TIMEOUT      how long to wait for a reply, e.g. 30m
-  DIANE_MAX_TOKENS   ceiling per reply; a thinking model needs room for the
-                     reasoning as well as the answer
-  DIANE_CLAUDE_MODEL, ANTHROPIC_API_KEY   used when DIANE_BACKEND=anthropic
-  DIANE_TOKEN        shared secret for serve. Same on every device.
-  DIANE_ADDR         what serve listens on
-  DIANE_SILENCE      seconds of silence that end a dictated utterance
-  DIANE_WHISPER_BIN, DIANE_WHISPER_MODEL, DIANE_THREADS      speech in
-  DIANE_TTS_BIN, DIANE_VOICE, DIANE_PLAY_BIN, DIANE_REC_BIN  speech out
+// ---------------------------------------------------------------- vault
 
-The README covers the phone shortcuts, the NixOS module and the setup.`
-
-// help prints the usage plus what this machine is actually configured to do,
-// which is the question you have when a command misbehaves.
-func help(cfg Config) {
-	fmt.Println(usage)
-	fmt.Printf(`
-IN EFFECT HERE
-
-  vault      %s
-  backend    %s
-  model      %s
-  voice      %s
-`, cfg.Vault, cfg.Backend, modelDesc(cfg), cfg.TTSBin+" "+cfg.Voice)
+type Vault struct {
+	dir    string
+	mu     sync.Mutex // serializes git + file work inside one process
+	upOnce sync.Once  // upstream is checked once per process
+	up     bool
 }
 
-func modelDesc(cfg Config) string {
-	if cfg.Backend == "anthropic" {
-		key := "ANTHROPIC_API_KEY set"
-		if cfg.APIKey == "" {
-			key = "ANTHROPIC_API_KEY MISSING"
+func openVault() (*Vault, error) {
+	dir := os.Getenv("DIANE_VAULT")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
 		}
-		return cfg.ClaudeModel + " (" + key + ")"
+		dir = filepath.Join(home, "vault")
 	}
-	return loaded(cfg) + " at " + cfg.LLMURL
+	if fi, err := os.Stat(filepath.Join(dir, ".git")); err != nil || !fi.IsDir() {
+		return nil, fmt.Errorf("%s is not a git clone (set DIANE_VAULT)", dir)
+	}
+	return &Vault{dir: dir}, nil
 }
 
-// number parses an integer from the environment.
-func number(key string, def int) int {
-	if n, err := strconv.Atoi(os.Getenv(key)); err == nil {
-		return n
+func (v *Vault) git(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = v.dir
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		return out.String(), fmt.Errorf("git %s: %w: %s",
+			strings.Join(args, " "), err, strings.TrimSpace(out.String()))
 	}
-	return def
+	return out.String(), nil
 }
 
-// duration parses a Go duration ("90s", "30m") from the environment.
-func duration(key string, def time.Duration) time.Duration {
-	if d, err := time.ParseDuration(os.Getenv(key)); err == nil {
-		return d
-	}
-	return def
+// hasUpstream reports whether the branch tracks anything. A clone with no
+// remote is a legitimate setup (single machine), so it should be quiet, not
+// an error on every command.
+func (v *Vault) hasUpstream() bool {
+	v.upOnce.Do(func() {
+		_, err := v.git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+		v.up = err == nil
+		if !v.up {
+			warn("no upstream configured; working locally")
+		}
+	})
+	return v.up
 }
 
-func env(key, def string) string {
+// abortRebase undoes a conflicted `pull --rebase`. Without this, git stays
+// mid-rebase and every later commit compounds the mess. Local commits are
+// kept; the merge is the user's problem, and only once.
+func (v *Vault) abortRebase() bool {
+	gitDir, err := v.git("rev-parse", "--git-dir")
+	if err != nil {
+		return false
+	}
+	base := strings.TrimSpace(gitDir)
+	if !filepath.IsAbs(base) {
+		base = filepath.Join(v.dir, base)
+	}
+	for _, d := range []string{"rebase-merge", "rebase-apply"} {
+		if _, err := os.Stat(filepath.Join(base, d)); err != nil {
+			continue
+		}
+		if _, err := v.git("rebase", "--abort"); err != nil {
+			warn("rebase in progress and --abort failed: %v", err)
+			warn("resolve by hand in %s before capturing again", v.dir)
+			return true
+		}
+		warn("pull conflicted (raw.md/inbox.md diverged); rebase aborted, "+
+			"local commits kept — reconcile %s by hand", v.dir)
+		return true
+	}
+	return false
+}
+
+// pull is best-effort: a capture must never be lost because the network is
+// down. Failures are reported and execution continues.
+func (v *Vault) pull() {
+	if !v.hasUpstream() {
+		return
+	}
+	if _, err := v.git("pull", "--rebase", "--autostash"); err != nil {
+		if !v.abortRebase() {
+			warn("pull failed, continuing offline: %v", err)
+		}
+	}
+}
+
+// push is likewise best-effort. The commit is what matters; the push can
+// happen on the next command.
+func (v *Vault) push(msg string) {
+	if _, err := v.git("add", "-A"); err != nil {
+		warn("%v", err)
+		return
+	}
+	if _, err := v.git("diff", "--cached", "--quiet"); err == nil {
+		return // nothing staged
+	}
+	if _, err := v.git("commit", "-m", msg); err != nil {
+		warn("%v", err)
+		return
+	}
+	if !v.hasUpstream() {
+		return
+	}
+	if _, err := v.git("push"); err != nil {
+		warn("push failed, commit is local: %v", err)
+	}
+}
+
+func (v *Vault) path(parts ...string) string {
+	return filepath.Join(append([]string{v.dir}, parts...)...)
+}
+
+func (v *Vault) appendTo(name, text string) error {
+	f, err := os.OpenFile(v.path(name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(text)
+	return err
+}
+
+// ---------------------------------------------------------------- drop
+
+// dropName is timestamp-host-nonce so that two machines capturing at the same
+// second still produce different files. That is the whole conflict story:
+// captures are never edited, so git has nothing to merge.
+func dropName(ext string) string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	host = strings.NewReplacer("/", "-", " ", "-", ".", "-").Replace(host)
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%s-%s-%d%s", time.Now().UTC().Format("20060102T150405Z"), host, time.Now().UnixNano()%65536, ext)
+	}
+	return fmt.Sprintf("%s-%s-%s%s",
+		time.Now().UTC().Format("20060102T150405Z"), host, hex.EncodeToString(b[:]), ext)
+}
+
+func (v *Vault) writeDrop(text, ext string, raw []byte) (string, error) {
+	if err := os.MkdirAll(v.path("drops"), 0o755); err != nil {
+		return "", err
+	}
+	name := dropName(ext)
+	body := raw
+	if body == nil {
+		body = []byte(strings.TrimRight(text, "\n") + "\n")
+	}
+	if err := os.WriteFile(v.path("drops", name), body, 0o644); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func (v *Vault) drop(text string) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		return "", errors.New("nothing to drop")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.pull()
+	name, err := v.writeDrop(text, ".md", nil)
+	if err != nil {
+		return "", err
+	}
+	v.push("drop " + name)
+	return name, nil
+}
+
+func cmdDrop(v *Vault, args []string) error {
+	var chunks []string
+	var words []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--file" || args[i] == "-f" {
+			if i+1 >= len(args) {
+				return errors.New("--file needs a path")
+			}
+			b, err := os.ReadFile(args[i+1])
+			if err != nil {
+				return err
+			}
+			chunks = append(chunks, string(b))
+			i++
+			continue
+		}
+		words = append(words, args[i])
+	}
+	if len(words) > 0 {
+		chunks = append(chunks, strings.Join(words, " "))
+	}
+	if len(chunks) == 0 {
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+		chunks = append(chunks, string(b))
+	}
+	name, err := v.drop(strings.Join(chunks, "\n\n"))
+	if err != nil {
+		return err
+	}
+	fmt.Println(name)
+	return nil
+}
+
+// ---------------------------------------------------------------- gather
+
+var urlRe = regexp.MustCompile(`https?://[^\s<>()\[\]"']+`)
+var titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+var wsRe = regexp.MustCompile(`\s+`)
+
+func fetchTitle(url string) string {
+	timeout := 10 * time.Second
+	if s := os.Getenv("DIANE_TIMEOUT"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			timeout = d
+		}
+	}
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("User-Agent", "diane/1 (+note capture)")
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil {
+		return ""
+	}
+	m := titleRe.FindSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	title := wsRe.ReplaceAllString(html.UnescapeString(string(m[1])), " ")
+	return strings.TrimSpace(title)
+}
+
+// label annotates bare URLs with the page title, so a dump of links is
+// readable (and clusterable) without opening any of them.
+func label(text string) string {
+	seen := map[string]bool{}
+	for _, url := range urlRe.FindAllString(text, -1) {
+		if seen[url] {
+			continue
+		}
+		seen[url] = true
+		if title := fetchTitle(url); title != "" {
+			text = strings.Replace(text, url, url+" — "+title, 1)
+		}
+	}
+	return text
+}
+
+// stampOf turns 20260921T142233Z-host-ab12 back into a readable header.
+func stampOf(name string) string {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	parts := strings.SplitN(base, "-", 2)
+	t, err := time.Parse("20060102T150405Z", parts[0])
+	if err != nil {
+		return base
+	}
+	host := ""
+	if len(parts) > 1 {
+		if i := strings.LastIndex(parts[1], "-"); i > 0 {
+			host = " (" + parts[1][:i] + ")"
+		}
+	}
+	return t.Local().Format("2006-01-02 15:04") + host
+}
+
+func cmdGather(v *Vault) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.pull()
+
+	entries, err := os.ReadDir(v.path("drops"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("nothing to gather")
+			return nil
+		}
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Println("nothing to gather")
+		return nil
+	}
+
+	var b strings.Builder
+	for _, name := range names {
+		if filepath.Ext(name) != ".md" {
+			// Media: move it out of drops/ and leave a reference behind.
+			if err := os.MkdirAll(v.path("media"), 0o755); err != nil {
+				return err
+			}
+			if err := os.Rename(v.path("drops", name), v.path("media", name)); err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, "\n## %s\n\n![](media/%s)\n", stampOf(name), name)
+			continue
+		}
+		raw, err := os.ReadFile(v.path("drops", name))
+		if err != nil {
+			return err
+		}
+		body := strings.TrimSpace(label(string(raw)))
+		if body == "" {
+			os.Remove(v.path("drops", name))
+			continue
+		}
+		fmt.Fprintf(&b, "\n## %s\n\n%s\n", stampOf(name), body)
+	}
+
+	if b.Len() > 0 {
+		if err := v.appendTo("raw.md", b.String()); err != nil {
+			return err
+		}
+		if err := v.appendTo("inbox.md", b.String()); err != nil {
+			return err
+		}
+	}
+	for _, name := range names {
+		if filepath.Ext(name) == ".md" {
+			os.Remove(v.path("drops", name))
+		}
+	}
+	v.push(fmt.Sprintf("gather %d", len(names)))
+	fmt.Printf("gathered %d\n", len(names))
+	return nil
+}
+
+// ---------------------------------------------------------------- serve
+
+const page = `<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>diane</title>
+<style>
+ :root{color-scheme:dark light}
+ body{margin:0;font:16px/1.4 system-ui,sans-serif;display:flex;
+      flex-direction:column;height:100dvh}
+ textarea{flex:1;width:100%;box-sizing:border-box;border:0;padding:1rem;
+          font:inherit;resize:none;background:transparent;color:inherit}
+ textarea:focus{outline:0}
+ button{padding:1rem;border:0;font:inherit;background:#3a6ea5;color:#fff}
+ #s{padding:.5rem 1rem;opacity:.7;font-size:.85rem}
+</style>
+<textarea id=t autofocus placeholder="…"></textarea>
+<div id=s></div>
+<button onclick=send()>drop</button>
+<script>
+async function send(){
+  const t=document.getElementById('t'), s=document.getElementById('s');
+  if(!t.value.trim())return;
+  s.textContent='…';
+  try{
+    const r=await fetch('/drop',{method:'POST',body:t.value});
+    s.textContent = r.ok ? 'dropped' : 'failed: '+r.status;
+    if(r.ok) t.value='';
+  }catch(e){ s.textContent='failed: '+e; }
+  t.focus();
+}
+document.addEventListener('keydown',e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();
+});
+</script>
+`
+
+type server struct {
+	v     *Vault
+	token string
+}
+
+func (s *server) authed(w http.ResponseWriter, r *http.Request) bool {
+	if s.token == "" {
+		return true // DIANE_OPEN
+	}
+	if t := r.URL.Query().Get("token"); t != "" {
+		if subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) == 1 {
+			http.SetCookie(w, &http.Cookie{
+				Name: "diane", Value: s.token, Path: "/",
+				MaxAge: 365 * 24 * 3600, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			})
+			return true
+		}
+	}
+	if c, err := r.Cookie("diane"); err == nil {
+		if subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.token)) == 1 {
+			return true
+		}
+	}
+	http.Error(w, "nope", http.StatusUnauthorized)
+	return false
+}
+
+func (s *server) index(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	io.WriteString(w, page)
+}
+
+func (s *server) drop(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(w, r) {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	text := string(body)
+	if v := r.FormValue("text"); v != "" { // tolerate form posts too
+		text = v
+	}
+	name, err := s.v.drop(text)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	fmt.Fprintln(w, name)
+}
+
+func (s *server) photo(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(w, r) {
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	f, hdr, err := r.FormFile("photo")
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, 32<<20))
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(hdr.Filename))
+	if ext == "" {
+		ext = ".jpg"
+	}
+	s.v.mu.Lock()
+	defer s.v.mu.Unlock()
+	s.v.pull()
+	name, err := s.v.writeDrop("", ext, raw)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	s.v.push("photo " + name)
+	fmt.Fprintln(w, name)
+}
+
+func (s *server) inbox(w http.ResponseWriter, r *http.Request) {
+	if !s.authed(w, r) {
+		return
+	}
+	s.v.mu.Lock()
+	defer s.v.mu.Unlock()
+	s.v.pull()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if b, err := os.ReadFile(s.v.path("inbox.md")); err == nil {
+		w.Write(b)
+	}
+	entries, err := os.ReadDir(s.v.path("drops"))
+	if err != nil {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".md" {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\n\n--- pending (%d) ---\n", len(names))
+	for _, name := range names {
+		if b, err := os.ReadFile(s.v.path("drops", name)); err == nil {
+			fmt.Fprintf(w, "\n## %s\n\n%s\n", stampOf(name), strings.TrimSpace(string(b)))
+		}
+	}
+}
+
+func cmdServe(v *Vault) error {
+	token := os.Getenv("DIANE_TOKEN")
+	if token == "" && os.Getenv("DIANE_OPEN") != "1" {
+		return errors.New("set DIANE_TOKEN, or DIANE_OPEN=1 to serve without auth")
+	}
+	addr := os.Getenv("DIANE_ADDR")
+	if addr == "" {
+		addr = "127.0.0.1:7777"
+	}
+	s := &server{v: v, token: token}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", s.index)
+	mux.HandleFunc("POST /drop", s.drop)
+	mux.HandleFunc("POST /photo", s.photo)
+	mux.HandleFunc("GET /inbox", s.inbox)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	fmt.Fprintf(os.Stderr, "diane serving %s on %s\n", v.dir, addr)
+	return srv.ListenAndServe()
+}
+
+// ---------------------------------------------------------------- main
+
+func warn(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "diane: "+format+"\n", args...)
+}
+
+func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return def
+	return def + " (default)"
 }
 
-func warn(format string, args ...any) { fmt.Fprintf(os.Stderr, "diane: "+format+"\n", args...) }
-
-func die(format string, args ...any) { warn(format, args...); os.Exit(1) }
+func cmdHelp(v *Vault) {
+	fmt.Print(usage)
+	fmt.Println("\nIN EFFECT HERE")
+	dir := "unset"
+	if v != nil {
+		dir = v.dir
+	}
+	fmt.Printf("  vault    %s\n", dir)
+	fmt.Printf("  addr     %s\n", envOr("DIANE_ADDR", "127.0.0.1:7777"))
+	token := "unset"
+	if os.Getenv("DIANE_TOKEN") != "" {
+		token = "set"
+	} else if os.Getenv("DIANE_OPEN") == "1" {
+		token = "unset, DIANE_OPEN=1"
+	}
+	fmt.Printf("  token    %s\n", token)
+	fmt.Printf("  timeout  %s\n", envOr("DIANE_TIMEOUT", "10s"))
+}
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println(usage)
+	args := os.Args[1:]
+	if len(args) == 0 {
+		args = []string{"help"}
+	}
+
+	if args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
+		v, _ := openVault() // help works without a vault
+		cmdHelp(v)
+		return
+	}
+
+	v, err := openVault()
+	if err != nil {
+		warn("%v", err)
 		os.Exit(1)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
-	cfg := loadConfig()
-	if cmd == "help" || cmd == "-h" || cmd == "--help" {
-		help(cfg)
-		return
-	}
-	v, err := openVault(cfg.Vault)
-	if err != nil {
-		die("%v", err)
-	}
 
-	switch cmd {
+	switch args[0] {
 	case "drop":
-		text := strings.Join(args, " ")
-		if len(args) == 0 {
-			b, _ := io.ReadAll(os.Stdin)
-			text = string(b)
-		}
-		if strings.TrimSpace(text) == "" {
-			die("nothing to drop")
-		}
-		e, err := v.drop(text)
-		if err != nil {
-			die("%v", err)
-		}
-		fmt.Print(e)
-
-	case "dictate":
-		text, err := listen(cfg)
-		if err != nil {
-			die("%v", err)
-		}
-		if text == "" {
-			die("heard nothing")
-		}
-		e, err := v.drop(text)
-		if err != nil {
-			die("%v", err)
-		}
-		fmt.Print(e)
-
-	case "photo":
-		if len(args) == 0 {
-			die("usage: diane photo <file> [caption]")
-		}
-		data, err := os.ReadFile(args[0])
-		if err != nil {
-			die("%v", err)
-		}
-		ext, ok := imageExt(data)
-		if !ok {
-			die("%s is not a recognised image", args[0])
-		}
-		file := mediaDir + "/" + strings.TrimSuffix(filepath.Base(args[0]), filepath.Ext(args[0])) + "-" + nonce() + ext
-		text := "[img] " + file
-		if c := strings.Join(args[1:], " "); c != "" {
-			text += "  " + c
-		}
-		e, err := v.capture(text, file, data)
-		if err != nil {
-			die("%v", err)
-		}
-		fmt.Print(e)
-
+		err = cmdDrop(v, args[1:])
 	case "gather":
-		n, err := v.gather()
-		if err != nil {
-			die("%v", err)
-		}
-		fmt.Printf("gathered %d\n", n)
-
+		err = cmdGather(v)
 	case "serve":
-		die("%v", serve(cfg, v))
-
-	case "anton":
-		fs := flag.NewFlagSet("anton", flag.ExitOnError)
-		text := fs.String("t", "", "handle this one utterance and exit")
-		voice := fs.Bool("v", false, "listen on the microphone instead of reading stdin")
-		quiet := fs.Bool("q", false, "print replies instead of speaking them")
-		fs.Parse(args)
-		if cfg.Backend == "anthropic" && cfg.APIKey == "" {
-			die("DIANE_BACKEND=anthropic but ANTHROPIC_API_KEY is not set")
-		}
-		anton(cfg, v, *text, *voice, *quiet)
-
+		err = cmdServe(v)
 	default:
-		die("unknown command %q", cmd)
+		err = fmt.Errorf("unknown command %q (try: diane help)", args[0])
 	}
-}
-
-// anton runs the conversation loop. Typed mode reads a line per turn from
-// stdin; voice mode records an utterance per turn.
-func anton(cfg Config, v Vault, once string, voice, quiet bool) {
-	var history []Message
-	if once == "" {
-		// A conversation syncs on the way in and on the way out, not four
-		// times a turn. Between those two points the vault is local: another
-		// machine's captures will not appear mid-conversation, and the
-		// commits made here sit unpushed until the exit sync. Nothing is
-		// lost if that never happens; they are committed, and the next
-		// command pushes them.
-		if err := v.syncNow(); err != nil {
-			warn("%v", err)
-		}
-		v.Deferred = true
-		defer func() {
-			if err := v.syncNow(); err != nil {
-				warn("%v", err)
-			}
-		}()
-		// Ctrl-C is the normal way out of the voice loop, so it has to run
-		// the exit sync too. os.Exit skips defers, hence the explicit call.
-		sigint := make(chan os.Signal, 1)
-		signal.Notify(sigint, os.Interrupt)
-		go func() {
-			<-sigint
-			if err := v.syncNow(); err != nil {
-				warn("%v", err)
-			}
-			fmt.Println()
-			os.Exit(0)
-		}()
+	if err != nil {
+		warn("%v", err)
+		os.Exit(1)
 	}
-	say := func(utterance string) {
-		reply, err := turn(cfg, v, &history, utterance)
-		if err != nil {
-			warn("%v", err)
-			return
-		}
-		fmt.Printf("anton: %s\n", reply)
-		if !quiet {
-			if err := speak(cfg, reply); err != nil {
-				warn("%v", err)
-			}
-		}
-	}
-
-	if once != "" {
-		say(once)
-		return
-	}
-	warn("vault %s, model %s", v.Root, loaded(cfg))
-	if voice {
-		for {
-			warn("-- listening --")
-			utterance, err := listen(cfg)
-			if err != nil {
-				die("%v", err)
-			}
-			if utterance == "" {
-				continue
-			}
-			fmt.Printf("you:   %s\n", utterance)
-			say(utterance)
-		}
-	}
-	in := bufio.NewScanner(os.Stdin)
-	for fmt.Print("you:   "); in.Scan(); fmt.Print("you:   ") {
-		if line := strings.TrimSpace(in.Text()); line != "" {
-			say(line)
-		}
-	}
-	fmt.Println()
 }
