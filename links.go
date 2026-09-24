@@ -247,7 +247,9 @@ var (
 		regexp.MustCompile(`(?is)<body\b[^>]*>(.*)</body>`),
 	}
 	blockRe = regexp.MustCompile(`(?i)</?(p|div|br|li|h[1-6]|tr|td|section|blockquote|pre|dd|dt)\b[^>]*>`)
-	tagRe   = regexp.MustCompile(`<[^>]*>`)
+	// A tag ends at the first ">" outside quotes: Wikipedia stores JSON with
+	// ">" inside data-mw='...' attributes, which a plain <[^>]*> cuts short.
+	tagRe = regexp.MustCompile(`<(?:[^>"']|"[^"]*"|'[^']*')*>`)
 )
 
 // bodyText is a crude readability pass: strip junk elements, take the most

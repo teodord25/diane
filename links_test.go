@@ -85,3 +85,12 @@ func TestParenURLs(t *testing.T) {
 		t.Fatal("label wrong")
 	}
 }
+
+func TestQuotedGT(t *testing.T) {
+	page := `<body><article><span data-mw='{"a":"<b>x</b>","n":1}'>Yisrael Galili was an Israeli weapons designer, best known for the Galil rifle.</span><p>Another sentence that is plenty long enough to keep here.</p></article></body>`
+	got := bodyText(page)
+	fmt.Println(got)
+	if strings.Contains(got, `"n"`) || !strings.Contains(got, "weapons designer") {
+		t.Fatal("attribute leaked")
+	}
+}
