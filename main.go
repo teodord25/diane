@@ -9,6 +9,7 @@
 //	inbox.md  working file; agents and humans may rewrite it
 //	drops/    one file per capture, folded in by `gather`
 //	media/    photos moved out of drops/ by `gather`
+//	links/    one file per captured URL: title + prose excerpt (see links.go)
 package main
 
 import (
@@ -18,13 +19,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -47,7 +46,7 @@ ENVIRONMENT
   DIANE_ADDR      serve listen address   (default 127.0.0.1:7777)
   DIANE_TOKEN     serve auth token       (required unless DIANE_OPEN=1)
   DIANE_OPEN      set to 1 to serve without auth (localhost only)
-  DIANE_TIMEOUT   link title fetch timeout (default 10s)
+  DIANE_TIMEOUT   per-link fetch timeout (default 10s)
 `
 
 // ---------------------------------------------------------------- vault
@@ -264,59 +263,6 @@ func cmdDrop(v *Vault, args []string) error {
 
 // ---------------------------------------------------------------- gather
 
-var urlRe = regexp.MustCompile(`https?://[^\s<>()\[\]"']+`)
-var titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-var wsRe = regexp.MustCompile(`\s+`)
-
-func fetchTitle(url string) string {
-	timeout := 10 * time.Second
-	if s := os.Getenv("DIANE_TIMEOUT"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil {
-			timeout = d
-		}
-	}
-	client := &http.Client{Timeout: timeout}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("User-Agent", "diane/1 (+note capture)")
-	resp, err := client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return ""
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	if err != nil {
-		return ""
-	}
-	m := titleRe.FindSubmatch(body)
-	if m == nil {
-		return ""
-	}
-	title := wsRe.ReplaceAllString(html.UnescapeString(string(m[1])), " ")
-	return strings.TrimSpace(title)
-}
-
-// label annotates bare URLs with the page title, so a dump of links is
-// readable (and clusterable) without opening any of them.
-func label(text string) string {
-	seen := map[string]bool{}
-	for _, url := range urlRe.FindAllString(text, -1) {
-		if seen[url] {
-			continue
-		}
-		seen[url] = true
-		if title := fetchTitle(url); title != "" {
-			text = strings.Replace(text, url, url+" — "+title, 1)
-		}
-	}
-	return text
-}
-
 // stampOf turns 20260921T142233Z-host-ab12 back into a readable header.
 func stampOf(name string) string {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
@@ -376,7 +322,7 @@ func cmdGather(v *Vault) error {
 		if err != nil {
 			return err
 		}
-		body := strings.TrimSpace(label(string(raw)))
+		body := strings.TrimSpace(string(raw))
 		if body == "" {
 			os.Remove(v.path("drops", name))
 			continue
@@ -385,10 +331,14 @@ func cmdGather(v *Vault) error {
 	}
 
 	if b.Len() > 0 {
-		if err := v.appendTo("raw.md", b.String()); err != nil {
+		// raw.md keeps captures verbatim; inbox.md gets [title](url) labels.
+		// Each URL's title + prose excerpt lands in links/ either way.
+		raw := b.String()
+		titles := enrichLinks(v.dir, raw)
+		if err := v.appendTo("raw.md", raw); err != nil {
 			return err
 		}
-		if err := v.appendTo("inbox.md", b.String()); err != nil {
+		if err := v.appendTo("inbox.md", labelLinks(raw, titles)); err != nil {
 			return err
 		}
 	}
