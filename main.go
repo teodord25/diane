@@ -35,6 +35,7 @@ const usage = `diane — append-only note capture over a git-synced vault
 USAGE
   diane drop [text...]        capture text (or --file PATH, or stdin)
   diane gather                fold drops/ into raw.md + inbox.md
+  diane links                 fetch context for any URL in raw.md missing from links/
   diane serve                 HTTP capture endpoint + textbox page
   diane help                  this text
 
@@ -352,6 +353,32 @@ func cmdGather(v *Vault) error {
 	return nil
 }
 
+// cmdLinks backfills links/ from raw.md: every URL without a context file
+// gets fetched (links that failed during gather, or captured before links.go).
+func cmdLinks(v *Vault) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.pull()
+
+	raw, err := os.ReadFile(v.path("raw.md"))
+	if err != nil {
+		return err
+	}
+	before := countLinks(v)
+	enrichLinks(v.dir, string(raw))
+	added := countLinks(v) - before
+	if added > 0 {
+		v.push(fmt.Sprintf("links %d", added))
+	}
+	fmt.Printf("fetched %d new, %d total\n", added, before+added)
+	return nil
+}
+
+func countLinks(v *Vault) int {
+	m, _ := filepath.Glob(v.path("links", "*.md"))
+	return len(m)
+}
+
 // ---------------------------------------------------------------- serve
 
 const page = `<!doctype html>
@@ -595,6 +622,8 @@ func main() {
 		err = cmdGather(v)
 	case "serve":
 		err = cmdServe(v)
+	case "links":
+		err = cmdLinks(v)
 	default:
 		err = fmt.Errorf("unknown command %q (try: diane help)", args[0])
 	}
