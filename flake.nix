@@ -17,7 +17,7 @@
         pname = "diane";
         version = "0.2.0";
         src = ./.;
-        vendorHash = null; # zero external Go dependencies; keep it that way
+        vendorHash = "sha256-45KAswdnYat9Vs5hafqzT0nxiFRnmWOsxdHp916ovOk=";
         nativeBuildInputs = [ pkgs.makeWrapper ];
         nativeCheckInputs = [ pkgs.git ];
         postInstall = ''

@@ -4,18 +4,21 @@ package main
 // write links/<id>.md: front matter (url, title, site) + a prose excerpt.
 // The excerpt is context for the agent, not for you to read.
 //
-//   YouTube:  og:title + channel + full description (from the player JSON)
-//   HTML:     og/meta description + best-guess body text (<article> > <main> > <body>)
+//   HTML:     go-readability (Mozilla's Readability.js, the Firefox Reader
+//             View algorithm) picks the title and the main article text
+//   YouTube:  same title, plus channel name and the full description,
+//             which lives in the page's inline player JSON
 //   other:    (PDF, images...) title = file name, no text
 //
-// Failures are skipped silently: no sidecar means the next gather retries.
+// Failures are skipped silently: no sidecar means the next gather (or
+// `diane links`) retries.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"os"
@@ -24,6 +27,10 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	readability "github.com/go-shiori/go-readability"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
 )
 
 const (
@@ -31,20 +38,11 @@ const (
 	maxText = 4000    // bytes of prose kept per link
 )
 
-// linkClient honors DIANE_TIMEOUT (default 10s) per fetch.
-func linkClient() *http.Client {
-	timeout := 10 * time.Second
-	if d, err := time.ParseDuration(os.Getenv("DIANE_TIMEOUT")); err == nil {
-		timeout = d
-	}
-	return &http.Client{Timeout: timeout}
-}
-
 type link struct {
 	URL, Title, Site, Text string
 }
 
-// ---- public: what gather calls ----
+// ---- public: what gather and `diane links` call ----
 
 // Parens are allowed inside URLs (Wikipedia: .../No_Reason_(horse));
 // trimURL strips a trailing ")" only when it's unbalanced, so
@@ -145,6 +143,15 @@ func readSidecarTitle(p string) (string, bool) {
 
 // ---- fetching ----
 
+// linkClient honors DIANE_TIMEOUT (default 10s) per fetch.
+func linkClient() *http.Client {
+	timeout := 10 * time.Second
+	if d, err := time.ParseDuration(os.Getenv("DIANE_TIMEOUT")); err == nil {
+		timeout = d
+	}
+	return &http.Client{Timeout: timeout}
+}
+
 func fetchLink(u string) (link, error) {
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
@@ -167,27 +174,42 @@ func fetchLink(u string) (link, error) {
 	final := resp.Request.URL // after redirects
 	l := link{URL: u, Site: strings.TrimPrefix(final.Host, "www.")}
 
-	if !strings.Contains(resp.Header.Get("Content-Type"), "html") {
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "html") {
 		l.Title = path.Base(final.Path)
 		return l, nil
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxPage))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxPage))
 	if err != nil {
 		return link{}, err
 	}
-	page := string(b)
-	m := metaTags(page)
+	// Convert to UTF-8 using the Content-Type header or <meta charset>.
+	utf8r, err := charset.NewReader(bytes.NewReader(raw), ct)
+	if err != nil {
+		return link{}, err
+	}
+	page, err := io.ReadAll(utf8r)
+	if err != nil {
+		return link{}, err
+	}
 
-	l.Title = first(m["og:title"], m["twitter:title"], titleTag(page), final.String())
-	desc := first(m["og:description"], m["description"], m["twitter:description"])
+	art, err := readability.FromReader(bytes.NewReader(page), final)
+	if err != nil {
+		l.Title = final.String() // unparseable: keep the link, no context
+		return l, nil
+	}
+	l.Title = first(oneLine(art.Title), final.String())
+	if art.SiteName != "" {
+		l.Site = art.SiteName
+	}
 
 	if isYouTube(final.Host) {
-		if ch := jsonString(page, "ownerChannelName"); ch != "" {
+		if ch := jsonString(string(page), "ownerChannelName"); ch != "" {
 			l.Title += " — " + ch
 		}
-		l.Text = first(jsonString(page, "shortDescription"), desc)
+		l.Text = first(jsonString(string(page), "shortDescription"), art.Excerpt)
 	} else {
-		l.Text = joinNonEmpty(desc, bodyText(page))
+		l.Text = joinNonEmpty(oneLine(art.Excerpt), blockText(art.Node))
 	}
 	l.Text = truncate(l.Text, maxText)
 	return l, nil
@@ -197,85 +219,6 @@ func isYouTube(host string) bool {
 	host = strings.TrimPrefix(host, "www.")
 	host = strings.TrimPrefix(host, "m.")
 	return host == "youtube.com" || host == "youtu.be" || host == "music.youtube.com"
-}
-
-// ---- HTML scraping without a parser ----
-
-var (
-	metaRe  = regexp.MustCompile(`(?is)<meta\s[^>]*>`)
-	attrRe  = regexp.MustCompile(`(?is)([a-z][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-)
-
-// metaTags maps <meta name|property=K content=V> to K -> V (first wins).
-func metaTags(page string) map[string]string {
-	out := map[string]string{}
-	for _, tag := range metaRe.FindAllString(page, -1) {
-		a := map[string]string{}
-		for _, m := range attrRe.FindAllStringSubmatch(tag, -1) {
-			a[strings.ToLower(m[1])] = m[2] + m[3]
-		}
-		k := strings.ToLower(first(a["property"], a["name"]))
-		if k != "" && a["content"] != "" && out[k] == "" {
-			out[k] = clean(a["content"])
-		}
-	}
-	return out
-}
-
-func titleTag(page string) string {
-	if m := titleRe.FindStringSubmatch(page); m != nil {
-		return clean(m[1])
-	}
-	return ""
-}
-
-// Elements whose contents are never prose.
-var junkRes = func() []*regexp.Regexp {
-	var rs []*regexp.Regexp
-	for _, t := range []string{"script", "style", "noscript", "svg", "template",
-		"nav", "header", "footer", "aside", "form", "button", "select"} {
-		rs = append(rs, regexp.MustCompile(`(?is)<`+t+`\b.*?</`+t+`\s*>`))
-	}
-	return append(rs, regexp.MustCompile(`(?s)<!--.*?-->`))
-}()
-
-var (
-	regionRes = []*regexp.Regexp{
-		regexp.MustCompile(`(?is)<article\b[^>]*>(.*?)</article>`),
-		regexp.MustCompile(`(?is)<main\b[^>]*>(.*?)</main>`),
-		regexp.MustCompile(`(?is)<body\b[^>]*>(.*)</body>`),
-	}
-	blockRe = regexp.MustCompile(`(?i)</?(p|div|br|li|h[1-6]|tr|td|section|blockquote|pre|dd|dt)\b[^>]*>`)
-	// A tag ends at the first ">" outside quotes: Wikipedia stores JSON with
-	// ">" inside data-mw='...' attributes, which a plain <[^>]*> cuts short.
-	tagRe = regexp.MustCompile(`<(?:[^>"']|"[^"]*"|'[^']*')*>`)
-)
-
-// bodyText is a crude readability pass: strip junk elements, take the most
-// specific content region, turn block tags into line breaks, drop tags, and
-// keep only lines that look like sentences (menus and buttons are short).
-func bodyText(page string) string {
-	for _, r := range junkRes {
-		page = r.ReplaceAllString(page, "")
-	}
-	for _, r := range regionRes {
-		if m := r.FindStringSubmatch(page); m != nil && len(tagRe.ReplaceAllString(m[1], "")) > 200 {
-			page = m[1]
-			break
-		}
-	}
-	page = blockRe.ReplaceAllString(page, "\n")
-	page = html.UnescapeString(tagRe.ReplaceAllString(page, " "))
-
-	var keep []string
-	for _, line := range strings.Split(page, "\n") {
-		line = strings.Join(strings.Fields(line), " ")
-		if len(strings.Fields(line)) >= 6 {
-			keep = append(keep, line)
-		}
-	}
-	return strings.Join(keep, "\n")
 }
 
 // jsonString finds "key":"..." anywhere in the page (e.g. YouTube's inline
@@ -292,9 +235,56 @@ func jsonString(page, key string) string {
 	return strings.TrimSpace(s)
 }
 
-// ---- small helpers ----
+// ---- readable text from the article node ----
 
-func clean(s string) string { return strings.Join(strings.Fields(html.UnescapeString(s)), " ") }
+var blockTags = map[string]bool{
+	"p": true, "div": true, "br": true, "li": true, "tr": true, "section": true,
+	"blockquote": true, "pre": true, "dd": true, "dt": true, "figcaption": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+}
+
+// blockText flattens the article's DOM to plain text with a line break per
+// block element, so paragraphs stay paragraphs.
+func blockText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		switch n.Type {
+		case html.TextNode:
+			b.WriteString(n.Data)
+		case html.ElementNode:
+			// Tables (Wikipedia infoboxes, data grids) and <sup> citation
+			// markers eat the 4 KB budget without saying what the page is about.
+			switch n.Data {
+			case "script", "style", "table", "sup":
+				return
+			}
+			if blockTags[n.Data] {
+				b.WriteString("\n")
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+		if n.Type == html.ElementNode && blockTags[n.Data] {
+			b.WriteString("\n")
+		}
+	}
+	walk(n)
+
+	var lines []string
+	for _, line := range strings.Split(b.String(), "\n") {
+		if line = oneLine(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ---- small helpers ----
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
@@ -307,8 +297,14 @@ func first(ss ...string) string {
 	return ""
 }
 
+// joinNonEmpty prepends a to b unless b already opens the same way (the
+// excerpt is usually the first paragraph, possibly with citation markers).
 func joinNonEmpty(a, b string) string {
-	if a == "" || strings.Contains(b, a) {
+	head := a
+	if len(head) > 60 {
+		head = strings.TrimSuffix(truncate(head, 60), " …")
+	}
+	if a == "" || strings.Contains(b, head) {
 		return b
 	}
 	if b == "" {
@@ -322,10 +318,8 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	for n > 0 && !utf8Start(s[n]) {
+	for n > 0 && s[n]&0xC0 == 0x80 {
 		n--
 	}
 	return s[:n] + " …"
 }
-
-func utf8Start(b byte) bool { return b&0xC0 != 0x80 }
