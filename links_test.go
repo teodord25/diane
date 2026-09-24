@@ -71,3 +71,17 @@ func TestYouTubeJSON(t *testing.T) {
 		t.Fatal("yt parse")
 	}
 }
+
+func TestParenURLs(t *testing.T) {
+	in := "a https://en.wikipedia.org/wiki/No_Reason_(horse) b (see https://x.com/a) c [t](https://en.wikipedia.org/wiki/X_(film)). d https://y.com/z."
+	got := findURLs(in)
+	want := []string{"https://en.wikipedia.org/wiki/No_Reason_(horse)", "https://x.com/a", "https://en.wikipedia.org/wiki/X_(film)", "https://y.com/z"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got %q", got)
+	}
+	out := labelLinks(in, map[string]string{want[0]: "No Reason", want[1]: "X", want[2]: "SHOULD NOT APPEAR", want[3]: "Z"})
+	fmt.Println(out)
+	if out != "a [No Reason](https://en.wikipedia.org/wiki/No_Reason_(horse)) b (see [X](https://x.com/a)) c [t](https://en.wikipedia.org/wiki/X_(film)). d [Z](https://y.com/z)." {
+		t.Fatal("label wrong")
+	}
+}

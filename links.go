@@ -46,13 +46,29 @@ type link struct {
 
 // ---- public: what gather calls ----
 
-var urlRe = regexp.MustCompile(`https?://[^\s<>()\[\]"'` + "`" + `]+`)
+// Parens are allowed inside URLs (Wikipedia: .../No_Reason_(horse));
+// trimURL strips a trailing ")" only when it's unbalanced, so
+// "(see https://x.com)" and "[t](https://x.com)" still come out right.
+var urlRe = regexp.MustCompile(`https?://[^\s<>\[\]"'` + "`" + `]+`)
+
+func trimURL(u string) string {
+	for {
+		t := strings.TrimRight(u, ".,;:!?")
+		if strings.HasSuffix(t, ")") && strings.Count(t, "(") < strings.Count(t, ")") {
+			t = t[:len(t)-1]
+		}
+		if t == u {
+			return u
+		}
+		u = t
+	}
+}
 
 // findURLs returns the URLs in text, trailing punctuation trimmed.
 func findURLs(text string) []string {
 	var out []string
 	for _, u := range urlRe.FindAllString(text, -1) {
-		out = append(out, strings.TrimRight(u, ".,;:!?"))
+		out = append(out, trimURL(u))
 	}
 	return out
 }
@@ -84,7 +100,7 @@ func labelLinks(text string, titles map[string]string) string {
 	var b strings.Builder
 	last := 0
 	for _, m := range urlRe.FindAllStringIndex(text, -1) {
-		u := strings.TrimRight(text[m[0]:m[1]], ".,;:!?")
+		u := trimURL(text[m[0]:m[1]])
 		end := m[0] + len(u)
 		t := titles[u]
 		if t == "" || strings.HasSuffix(text[:m[0]], "](") {
