@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +39,7 @@ USAGE
   diane gather                fold drops/ into raw.md + inbox.md
   diane links                 fetch context for any URL in raw.md missing from links/
   diane serve                 HTTP capture endpoint + textbox page
+                              (/?newtab: same page, but doesn't grab focus)
   diane help                  this text
 
 DROP FLAGS
@@ -46,7 +49,8 @@ ENVIRONMENT
   DIANE_VAULT     vault clone            (default ~/vault)
   DIANE_ADDR      serve listen address   (default 127.0.0.1:7777)
   DIANE_TOKEN     serve auth token       (required unless DIANE_OPEN=1)
-  DIANE_OPEN      set to 1 to serve without auth (localhost only)
+  DIANE_OPEN      set to 1 to serve without auth; only loopback Host headers
+                  are accepted then (browser new-tab page, see ?newtab below)
   DIANE_TIMEOUT   per-link fetch timeout (default 10s)
 `
 
@@ -395,10 +399,14 @@ const page = `<!doctype html>
  button{padding:1rem;border:0;font:inherit;background:#3a6ea5;color:#fff}
  #s{padding:.5rem 1rem;opacity:.7;font-size:.85rem}
 </style>
-<textarea id=t autofocus placeholder="…"></textarea>
+<textarea id=t placeholder="…"></textarea>
 <div id=s></div>
 <button onclick=send()>drop</button>
 <script>
+// As a browser new-tab page (/?newtab) the textbox must not grab focus:
+// that would put vim-style extensions in insert mode and eat navigation keys.
+if(!new URLSearchParams(location.search).has('newtab'))
+  document.getElementById('t').focus();
 async function send(){
   const t=document.getElementById('t'), s=document.getElementById('s');
   if(!t.value.trim())return;
@@ -421,9 +429,45 @@ type server struct {
 	token string
 }
 
+// isLoopback reports whether a Host header names this machine. Checked in
+// open mode so a DNS-rebinding page (evil.example -> 127.0.0.1) can't pass
+// as same-origin and reach an auth-less endpoint.
+func isLoopback(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// crossSite reports a browser request made by some other origin. A page on
+// any site can fire a no-CORS POST at 127.0.0.1; the browser still sends
+// Origin, so that's what gets checked. Clients that send no Origin (curl,
+// phone shortcuts) are unaffected.
+func crossSite(r *http.Request) bool {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return false
+	}
+	u, err := url.Parse(o)
+	return err != nil || u.Host != r.Host
+}
+
 func (s *server) authed(w http.ResponseWriter, r *http.Request) bool {
-	if s.token == "" {
-		return true // DIANE_OPEN
+	if r.Method != http.MethodGet && crossSite(r) {
+		http.Error(w, "cross-site request", http.StatusForbidden)
+		return false
+	}
+	if s.token == "" { // DIANE_OPEN
+		if !isLoopback(r.Host) {
+			http.Error(w, "open mode serves loopback only", http.StatusForbidden)
+			return false
+		}
+		return true
 	}
 	if t := r.URL.Query().Get("token"); t != "" {
 		if subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) == 1 {
