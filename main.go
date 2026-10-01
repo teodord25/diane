@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -210,6 +211,23 @@ func (v *Vault) sync() {
 	v.pushOnly()
 }
 
+// closeInheritedFDs marks every fd above stderr close-on-exec. Go sets that
+// flag on fds it opens itself, but not on ones inherited from whoever started
+// us. Tridactyl's native messenger leaves one of its pipes open in children;
+// the background sync would inherit it, and the messenger would wait for EOF
+// on it, so the browser stayed open until the push finished.
+func closeInheritedFDs() {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return // not Linux; nothing we can portably do
+	}
+	for _, e := range entries {
+		if fd, err := strconv.Atoi(e.Name()); err == nil && fd > 2 {
+			syscall.CloseOnExec(fd)
+		}
+	}
+}
+
 // syncLater starts `diane sync` detached and returns immediately, so a drop
 // costs a local commit instead of two network round trips. The child gets its
 // own session and /dev/null stdio: nothing waits on it, it survives our exit,
@@ -225,6 +243,7 @@ func (v *Vault) syncLater() {
 		v.sync()
 		return
 	}
+	closeInheritedFDs()
 	cmd := exec.Command(exe, "sync")
 	cmd.Dir = v.dir
 	cmd.Env = append(os.Environ(), "DIANE_VAULT="+v.dir)
