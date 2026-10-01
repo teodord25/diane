@@ -9,8 +9,6 @@
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
       # Everything diane shells out to. The wrapper puts exactly these on PATH.
-      # llama-server is deliberately absent: it is a long-running process you
-      # start yourself (serve-llm.sh), not something diane spawns.
       runtimeDeps = pkgs: with pkgs; [ git sox whisper-cpp piper-tts alsa-utils ];
 
       package = pkgs: pkgs.buildGoModule {
@@ -30,19 +28,12 @@
     {
       packages = forAll (pkgs: {
         default = package pkgs;
-        llama-server = pkgs.writeShellApplication {
-          name = "diane-llama-server";
-          runtimeInputs = [ (pkgs.llama-cpp.override { vulkanSupport = true; }) ];
-          text = builtins.readFile ./serve-llm.sh;
-        };
       });
 
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
           packages = runtimeDeps pkgs ++ (with pkgs; [
             go gopls jq curl
-            # Vulkan build of llama.cpp; on RDNA4 (RX 9070 XT) less fuss than ROCm.
-            (llama-cpp.override { vulkanSupport = true; })
           ]);
           shellHook = ''
             export PATH="$PWD/bin:$PATH"
