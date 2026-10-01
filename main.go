@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -37,6 +38,8 @@ const usage = `diane — append-only note capture over a git-synced vault
 USAGE
   diane drop [text...]        capture text (or --file PATH, or stdin)
   diane gather                fold drops/ into raw.md + inbox.md
+  diane sync                  pull, commit leftovers, push (drops run this
+                              in the background)
   diane links                 fetch context for any URL in raw.md missing from links/
   diane serve                 HTTP capture endpoint + textbox page
                               (/?newtab: same page, but doesn't grab focus)
@@ -138,6 +141,7 @@ func (v *Vault) pull() {
 	if !v.hasUpstream() {
 		return
 	}
+	defer v.gitLock()()
 	if _, err := v.git("pull", "--rebase", "--autostash"); err != nil {
 		if !v.abortRebase() {
 			warn("pull failed, continuing offline: %v", err)
@@ -145,26 +149,92 @@ func (v *Vault) pull() {
 	}
 }
 
-// push is likewise best-effort. The commit is what matters; the push can
-// happen on the next command.
-func (v *Vault) push(msg string) {
+// gitLock serializes git work across processes. Drops sync in a detached
+// background `diane sync`, so two processes can touch the repo at once; a
+// second `pull --rebase` would otherwise see the first one's rebase-merge dir
+// and abortRebase it. Returns the unlock func. Not reentrant: never nest.
+func (v *Vault) gitLock() func() {
+	f, err := os.OpenFile(filepath.Join(v.dir, ".git", "diane.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		warn("lock: %v (continuing unlocked)", err)
+		return func() {}
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		warn("lock: %v (continuing unlocked)", err)
+	}
+	return func() { f.Close() } // closing the fd releases the flock
+}
+
+// commit stages everything and commits it locally. Reports whether a commit
+// was made.
+func (v *Vault) commit(msg string) bool {
+	defer v.gitLock()()
 	if _, err := v.git("add", "-A"); err != nil {
 		warn("%v", err)
-		return
+		return false
 	}
 	if _, err := v.git("diff", "--cached", "--quiet"); err == nil {
-		return // nothing staged
+		return false // nothing staged
 	}
 	if _, err := v.git("commit", "-m", msg); err != nil {
 		warn("%v", err)
-		return
+		return false
 	}
+	return true
+}
+
+// pushOnly pushes whatever is committed. Best-effort, like pull.
+func (v *Vault) pushOnly() {
 	if !v.hasUpstream() {
 		return
 	}
+	defer v.gitLock()()
 	if _, err := v.git("push"); err != nil {
 		warn("push failed, commit is local: %v", err)
 	}
+}
+
+// push is likewise best-effort. The commit is what matters; the push can
+// happen on the next command.
+func (v *Vault) push(msg string) {
+	if v.commit(msg) {
+		v.pushOnly()
+	}
+}
+
+// sync pulls, commits anything left uncommitted, and pushes. It is what the
+// background process started by syncLater runs.
+func (v *Vault) sync() {
+	v.pull()
+	v.commit("sync")
+	v.pushOnly()
+}
+
+// syncLater starts `diane sync` detached and returns immediately, so a drop
+// costs a local commit instead of two network round trips. The child gets its
+// own session and /dev/null stdio: nothing waits on it, it survives our exit,
+// and it doesn't hold a caller's stdout pipe open (Tridactyl's native
+// messenger reads until EOF).
+func (v *Vault) syncLater() {
+	if !v.hasUpstream() {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		warn("background sync: %v; syncing inline", err)
+		v.sync()
+		return
+	}
+	cmd := exec.Command(exe, "sync")
+	cmd.Dir = v.dir
+	cmd.Env = append(os.Environ(), "DIANE_VAULT="+v.dir)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		warn("background sync: %v; syncing inline", err)
+		v.sync()
+		return
+	}
+	go cmd.Wait() // reap it when serve is the parent; harmless for the CLI
 }
 
 func (v *Vault) path(parts ...string) string {
@@ -221,12 +291,15 @@ func (v *Vault) drop(text string) (string, error) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.pull()
+	// No pull first: a drop is a new, uniquely named file, so it can't
+	// conflict with anything upstream. Write + local commit is the durable
+	// part; the network happens in the background.
 	name, err := v.writeDrop(text, ".md", nil)
 	if err != nil {
 		return "", err
 	}
-	v.push("drop " + name)
+	v.commit("drop " + name)
+	v.syncLater()
 	return name, nil
 }
 
@@ -662,6 +735,8 @@ func main() {
 	switch args[0] {
 	case "drop":
 		err = cmdDrop(v, args[1:])
+	case "sync":
+		v.sync()
 	case "gather":
 		err = cmdGather(v)
 	case "serve":
