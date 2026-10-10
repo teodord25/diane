@@ -147,6 +147,37 @@ At gather time every URL in a capture gets its page title appended:
 The URL is never altered; if the fetch fails the line stays as captured. Done
 at gather rather than at capture so a slow site can't slow a drop.
 
+## New tab page
+
+`diane serve` at `/?newtab` is Firefox's new tab: one saying from
+`wisdom.md`, a note box, and the last few captures in the margin.
+
+`wisdom.md` lives in the vault, so it syncs and you edit it anywhere:
+
+```
+# lines starting with # are comments
+
+The tab is not the task.
+
+---
+
+When you reach for a new tab to save something for later, drop it instead.
+— me
+
+---
+
+# archive
+moved here = kept, never shown
+```
+
+Entries are separated by `---`; a last line starting with `— ` is the source.
+Each new tab picks one at random, weighted by how long since it was last shown:
+$w = 1 - e^{-\Delta t/\tau}$, so a saying you just saw is close to impossible
+and anything not seen for a few $\tau$ is back to full weight. $\tau$ is
+`DIANE_WISDOM_TAU` (default `12h`). "Last seen" is kept per machine in
+`~/.local/state/diane/wisdom-seen.json`, not in the vault, so opening tabs
+never makes commits. No `wisdom.md` just means no saying.
+
 ## Anton
 
 One model call per turn: the whole vault goes in the prompt, the model returns
@@ -197,6 +228,7 @@ Kokoro-82M one (`pip install kokoro-onnx soundfile`, model files into
 | `DIANE_WHISPER_BIN` / `DIANE_WHISPER_MODEL` / `DIANE_THREADS` | `whisper-cli` / `~/.local/share/diane/ggml-base.en.bin` / `4` |
 | `DIANE_TTS_BIN` / `DIANE_VOICE` | `piper-tts` / `~/.local/share/diane/en_US-lessac-medium.onnx` |
 | `DIANE_PLAY_BIN` | `aplay` |
+| `DIANE_WISDOM_TAU` | `12h` |
 
 ## Reading order
 

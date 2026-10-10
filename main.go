@@ -10,6 +10,7 @@
 //	drops/    one file per capture, folded in by `gather`
 //	media/    photos moved out of drops/ by `gather`
 //	links/    one file per captured URL: title + prose excerpt (see links.go)
+//	wisdom.md sayings for the new-tab page (see wisdom.go)
 package main
 
 import (
@@ -37,25 +38,28 @@ import (
 const usage = `diane — append-only note capture over a git-synced vault
 
 USAGE
-  diane drop [text...]        capture text (or --file PATH, or stdin)
-  diane gather                fold drops/ into raw.md + inbox.md
-  diane sync                  pull, commit leftovers, push (drops run this
-                              in the background)
-  diane links                 fetch context for any URL in raw.md missing from links/
-  diane serve                 HTTP capture endpoint + textbox page
-                              (/?newtab: same page, but doesn't grab focus)
-  diane help                  this text
+  diane drop [text...]  capture text (or --file PATH, or stdin)
+  diane gather          fold drops/ into raw.md + inbox.md
+  diane sync            pull, commit leftovers, push (drops run this
+                        in the background)
+  diane links           fetch context for any URL in raw.md missing from links/
+  diane serve           HTTP capture endpoint + capture page: one
+                        saying from wisdom.md, a note box, recent captures
+                        (/?newtab: same page, but doesn't grab focus)
+  diane help            this text
 
 DROP FLAGS
-  --file PATH                 capture the contents of PATH (repeatable)
+  --file PATH           capture the contents of PATH (repeatable)
 
 ENVIRONMENT
-  DIANE_VAULT     vault clone            (default ~/vault)
-  DIANE_ADDR      serve listen address   (default 127.0.0.1:7777)
-  DIANE_TOKEN     serve auth token       (required unless DIANE_OPEN=1)
-  DIANE_OPEN      set to 1 to serve without auth; only loopback Host headers
-                  are accepted then (browser new-tab page, see ?newtab below)
-  DIANE_TIMEOUT   per-link fetch timeout (default 10s)
+  DIANE_VAULT           vault clone            (default ~/vault)
+  DIANE_ADDR            serve listen address   (default 127.0.0.1:7777)
+  DIANE_TOKEN           serve auth token       (required unless DIANE_OPEN=1)
+  DIANE_OPEN            set to 1 to serve without auth; only loopback Host headers
+                        are accepted then (browser new-tab page, see ?newtab below)
+  DIANE_TIMEOUT         per-link fetch timeout (default 10s)
+  DIANE_WISDOM_TAU      how long a shown saying stays unlikely (default 12h);
+                        see wisdom.go
 `
 
 // ---------------------------------------------------------------- vault
@@ -477,48 +481,10 @@ func countLinks(v *Vault) int {
 
 // ---------------------------------------------------------------- serve
 
-const page = `<!doctype html>
-<meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<title>diane</title>
-<style>
- :root{color-scheme:dark light}
- body{margin:0;font:16px/1.4 system-ui,sans-serif;display:flex;
-      flex-direction:column;height:100dvh}
- textarea{flex:1;width:100%;box-sizing:border-box;border:0;padding:1rem;
-          font:inherit;resize:none;background:transparent;color:inherit}
- textarea:focus{outline:0}
- button{padding:1rem;border:0;font:inherit;background:#3a6ea5;color:#fff}
- #s{padding:.5rem 1rem;opacity:.7;font-size:.85rem}
-</style>
-<textarea id=t placeholder="…"></textarea>
-<div id=s></div>
-<button onclick=send()>drop</button>
-<script>
-// As a browser new-tab page (/?newtab) the textbox must not grab focus:
-// that would put vim-style extensions in insert mode and eat navigation keys.
-if(!new URLSearchParams(location.search).has('newtab'))
-  document.getElementById('t').focus();
-async function send(){
-  const t=document.getElementById('t'), s=document.getElementById('s');
-  if(!t.value.trim())return;
-  s.textContent='…';
-  try{
-    const r=await fetch('/drop',{method:'POST',body:t.value});
-    s.textContent = r.ok ? 'dropped' : 'failed: '+r.status;
-    if(r.ok) t.value='';
-  }catch(e){ s.textContent='failed: '+e; }
-  t.focus();
-}
-document.addEventListener('keydown',e=>{
-  if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();
-});
-</script>
-`
-
 type server struct {
-	v     *Vault
-	token string
+	v      *Vault
+	token  string
+	wisdom *wisdom // nil in tests
 }
 
 // isLoopback reports whether a Host header names this machine. Checked in
@@ -577,14 +543,6 @@ func (s *server) authed(w http.ResponseWriter, r *http.Request) bool {
 	}
 	http.Error(w, "nope", http.StatusUnauthorized)
 	return false
-}
-
-func (s *server) index(w http.ResponseWriter, r *http.Request) {
-	if !s.authed(w, r) {
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, page)
 }
 
 func (s *server) drop(w http.ResponseWriter, r *http.Request) {
@@ -685,7 +643,7 @@ func cmdServe(v *Vault) error {
 	if addr == "" {
 		addr = "127.0.0.1:7777"
 	}
-	s := &server{v: v, token: token}
+	s := &server{v: v, token: token, wisdom: newWisdom(v.dir)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.index)
 	mux.HandleFunc("POST /drop", s.drop)
