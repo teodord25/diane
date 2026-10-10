@@ -60,6 +60,8 @@ ENVIRONMENT
   DIANE_TIMEOUT         per-link fetch timeout (default 10s)
   DIANE_WISDOM_TAU      how long a shown saying stays unlikely (default 12h);
                         see wisdom.go
+  DIANE_FONT_DIRS       colon-separated dirs the page's web fonts are served
+                        from (see fonts.go)
 `
 
 // ---------------------------------------------------------------- vault
@@ -484,7 +486,8 @@ func countLinks(v *Vault) int {
 type server struct {
 	v      *Vault
 	token  string
-	wisdom *wisdom // nil in tests
+	wisdom *wisdom    // nil in tests
+	fonts  *fontIndex // nil in tests
 }
 
 // isLoopback reports whether a Host header names this machine. Checked in
@@ -643,12 +646,13 @@ func cmdServe(v *Vault) error {
 	if addr == "" {
 		addr = "127.0.0.1:7777"
 	}
-	s := &server{v: v, token: token, wisdom: newWisdom(v.dir)}
+	s := &server{v: v, token: token, wisdom: newWisdom(v.dir), fonts: newFontIndex()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.index)
 	mux.HandleFunc("POST /drop", s.drop)
 	mux.HandleFunc("POST /photo", s.photo)
 	mux.HandleFunc("GET /inbox", s.inbox)
+	mux.HandleFunc("GET /fonts/{name}", s.font)
 
 	srv := &http.Server{
 		Addr:              addr,

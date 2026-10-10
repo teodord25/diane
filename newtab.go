@@ -214,14 +214,31 @@ var pageTmpl = template.Must(template.New("page").Parse(`<!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>diane</title>
 <style>
+/* Served by diane (fonts.go): Firefox's fingerprinting protection hides
+   installed fonts from pages, web fonts are exempt. Missing files 404 and the
+   next family in each stack takes over. */
+@font-face{font-family:"d-display";font-weight:100 900;
+  src:url(/fonts/EVA-Matisse_Standard.ttf);
+  /* everything but spaces: Matisse is a CJK face and its spaces are wide,
+     so spaces come from the next family (Source Serif) */
+  unicode-range:U+0-1F,U+21-9F,U+A1-2FFF,U+3001-10FFFF}
+@font-face{font-family:"d-serif";font-weight:400;
+  src:url(/fonts/SourceSerif4-Regular.ttf),url(/fonts/SourceSerif4-Regular.otf)}
+@font-face{font-family:"d-serif";font-weight:400;font-style:italic;
+  src:url(/fonts/SourceSerif4-It.ttf),url(/fonts/SourceSerif4-It.otf)}
+@font-face{font-family:"d-serif";font-weight:600 900;
+  src:url(/fonts/SourceSerif4-Semibold.ttf),url(/fonts/SourceSerif4-Semibold.otf)}
+@font-face{font-family:"d-mono";font-weight:400;
+  src:url(/fonts/JetBrainsMono-Regular.woff2),url(/fonts/JetBrainsMono-Regular.ttf),
+      url(/fonts/JetBrainsMonoNerdFont-Regular.ttf)}
 :root{
   color-scheme:dark;
   --ground:#0E0E0E; --panel:#151515; --line:#262626;
   --ink:#D6D6D6; --hi:#ECECEC; --dim:#8A8A8A;
   --deep:#9A0000; --red:#E84848;
-  --display:"EVA-Matisse_Standard","Shippori Mincho B1","Source Serif 4",serif;
-  --serif:"Source Serif 4",serif;
-  --mono:"JetBrains Mono","JetBrainsMono Nerd Font",monospace;
+  --display:"d-display","d-serif","Source Serif 4",serif;
+  --serif:"d-serif","Source Serif 4",serif;
+  --mono:"d-mono","JetBrains Mono",monospace;
 }
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%;background:var(--ground);color:var(--ink);
@@ -231,8 +248,7 @@ main{flex:1;display:flex;gap:56px;padding:64px 64px 56px 72px}
 .write{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;gap:18px}
 .rule{width:64px;height:3px;background:var(--deep)}
 .saying{margin:0;font-family:var(--display);font-weight:800;color:var(--hi);
-  letter-spacing:-.015em;line-height:1.08;white-space:pre-line;text-wrap:balance;
-  word-spacing:-.18em} /* Matisse is a CJK face: its space glyph is wide */
+  letter-spacing:-.015em;line-height:1.08;white-space:pre-line;text-wrap:balance}
 .saying.xl{font-size:clamp(56px,8vw,120px)}
 .saying.l{font-size:clamp(36px,4.6vw,64px)}
 .saying.m{font-size:clamp(28px,3.4vw,46px)}

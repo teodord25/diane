@@ -2,6 +2,8 @@ package main
 
 import (
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,5 +166,30 @@ func TestSummarizeTabDump(t *testing.T) {
 	}
 	if got := summarize("![](media/x.jpg)"); got != "photo" {
 		t.Errorf("photo = %q", got)
+	}
+}
+
+func TestFontEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "truetype"), 0o755)
+	os.WriteFile(filepath.Join(dir, "truetype", "Good.ttf"), []byte("font"), 0o644)
+	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("no"), 0o644)
+	s := &server{fonts: &fontIndex{dirs: []string{dir}}} // open mode
+	get := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "http://127.0.0.1:7777"+path, nil)
+		r.Host = "127.0.0.1:7777"
+		w := httptest.NewRecorder()
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /fonts/{name}", s.font)
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	if w := get("/fonts/Good.ttf"); w.Code != 200 || w.Body.String() != "font" || w.Header().Get("Content-Type") != "font/ttf" {
+		t.Errorf("good font: %d %q %q", w.Code, w.Body.String(), w.Header().Get("Content-Type"))
+	}
+	for _, p := range []string{"/fonts/Missing.ttf", "/fonts/secret.txt", "/fonts/..%2Fsecret.txt", "/fonts/.hidden.ttf"} {
+		if w := get(p); w.Code == 200 {
+			t.Errorf("%s served: %q", p, w.Body.String())
+		}
 	}
 }
