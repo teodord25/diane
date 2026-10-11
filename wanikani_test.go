@@ -78,7 +78,7 @@ func TestWaniKaniSummary(t *testing.T) {
 		t.Errorf("over=%v bar=%d note=%q", v.Over, v.BarPct, v.Note)
 	}
 	// Later, without refetching: the +3h bucket has become available.
-	if v := wk.view(now.Add(3 * time.Hour)); v.Reviews != 10 || v.Next != "none in the next day" || v.Note != "stale" {
+	if v := wk.view(now.Add(3 * time.Hour)); v.Reviews != 10 || v.Next != "no more in 24h" || v.Note != "stale" {
 		t.Errorf("3h later: %+v", v)
 	}
 	// A refresh within 5 minutes is a no-op.
@@ -129,9 +129,19 @@ func TestPageRendersWaniKani(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := html.UnescapeString(b.String()) // the template writes + as &#43;
-	for _, want := range []string{`class="wk over"`, "<b>58</b> reviews", "over 40 — do them", "3 lessons · next +2h", "width:72%"} {
+	for _, want := range []string{`class="wk over"`, "<b>58</b> reviews", "over 40 — do them", "3 lessons</a> · next +2h", "width:72%", `href="https://www.wanikani.com/subjects/review"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("page missing %q", want)
 		}
+	}
+}
+
+func TestPageWaniKaniNoLinksWhenEmpty(t *testing.T) {
+	var b strings.Builder
+	if err := pageTmpl.Execute(&b, pageData{WaniKani: &wkView{Threshold: 40, Next: "next +1h"}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "subjects/review") || strings.Contains(b.String(), "/dashboard") {
+		t.Error("links shown with nothing to do")
 	}
 }

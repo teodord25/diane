@@ -218,7 +218,7 @@ func (wk *wanikani) view(now time.Time) *wkView {
 
 func nextLabel(next, now time.Time) string {
 	if next.IsZero() {
-		return "none in the next day"
+		return "no more in 24h" // the summary only looks a day ahead
 	}
 	d := next.Sub(now)
 	if d < time.Hour {

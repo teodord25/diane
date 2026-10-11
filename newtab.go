@@ -280,6 +280,12 @@ aside .lately-h{border-top:1px solid var(--line)}
 .wk-num{display:flex;align-items:baseline;gap:10px;font-size:15px}
 .wk-num b{font:500 30px var(--mono);color:var(--hi)}
 .wk.over .wk-num b,.wk.over .wk-head span{color:var(--red)}
+.wk-go{margin-left:auto;font:12px var(--mono);color:var(--ink);text-decoration:none;
+  border:1px solid var(--line);padding:4px 10px}
+.wk-go:hover,.wk-go:focus-visible{border-color:var(--red);color:var(--hi);outline:0}
+.wk.over .wk-go{background:var(--deep);border-color:var(--deep);color:var(--hi)}
+.wk-foot a{color:inherit;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+.wk-foot a:hover{color:var(--ink)}
 .wk-bar{height:4px;background:var(--line)}
 .wk-bar i{display:block;height:100%;background:var(--deep)}
 aside ol{list-style:none;margin:0;padding:0}
@@ -312,9 +318,9 @@ aside li span{font-size:15px;overflow-wrap:anywhere}
     {{with .WaniKani}}
     <section class="wk{{if .Over}} over{{end}}" aria-label=WaniKani>
       <div class=wk-head><h2>WaniKani</h2><span>{{if .Over}}over {{.Threshold}} — do them{{else}}under {{.Threshold}}{{end}}</span></div>
-      <div class=wk-num><b>{{.Reviews}}</b> reviews</div>
+      <div class=wk-num><b>{{.Reviews}}</b> reviews{{if .Reviews}}<a class=wk-go href="https://www.wanikani.com/subjects/review">review →</a>{{end}}</div>
       <div class=wk-bar><i style="width:{{.BarPct}}%"></i></div>
-      <div class=wk-foot>{{.Lessons}} lessons · {{.Next}}{{with .Note}} · {{.}}{{end}}</div>
+      <div class=wk-foot>{{if .Lessons}}<a href="https://www.wanikani.com/dashboard">{{.Lessons}} lessons</a>{{else}}0 lessons{{end}} · {{.Next}}{{with .Note}} · {{.}}{{end}}</div>
     </section>
     {{end}}
     <h2 class=lately-h>Lately</h2>
