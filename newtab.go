@@ -162,6 +162,7 @@ type pageData struct {
 	SayingFit string // xl | l | m: font size by length
 	SeenLabel string
 	Lately    []lately
+	WaniKani  *wkView // nil: no token, or no data yet
 }
 
 func sayingFit(text string) string {
@@ -200,6 +201,10 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 			d.SayingFit = sayingFit(say.Text)
 			d.SeenLabel = seenLabel(ago)
 		}
+	}
+	if s.wanikani != nil {
+		s.wanikani.refresh(now) // background; this tab shows the cached numbers
+		d.WaniKani = s.wanikani.view(now)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store") // a new saying every tab
@@ -267,6 +272,16 @@ button{display:none}
 aside{width:260px;flex-shrink:0;display:flex;flex-direction:column;justify-content:flex-end;
   padding-left:28px;border-left:1px solid var(--line)}
 aside h2{margin:0;font:italic 14px var(--serif);color:var(--dim);padding:10px 0 12px}
+aside .lately-h{border-top:1px solid var(--line)}
+.wk{display:flex;flex-direction:column;gap:8px;padding-bottom:22px}
+.wk-head{display:flex;justify-content:space-between;align-items:baseline}
+.wk-head h2{padding:0}
+.wk-head span,.wk-foot{font:11px var(--mono);color:var(--dim)}
+.wk-num{display:flex;align-items:baseline;gap:10px;font-size:15px}
+.wk-num b{font:500 30px var(--mono);color:var(--hi)}
+.wk.over .wk-num b,.wk.over .wk-head span{color:var(--red)}
+.wk-bar{height:4px;background:var(--line)}
+.wk-bar i{display:block;height:100%;background:var(--deep)}
 aside ol{list-style:none;margin:0;padding:0}
 aside li{display:flex;flex-direction:column;gap:4px;padding:11px 0;border-top:1px solid var(--line)}
 aside time{font:11px var(--mono);color:var(--dim)}
@@ -294,8 +309,15 @@ aside li span{font-size:15px;overflow-wrap:anywhere}
     <div class=keys><span><b>gi</b> write a note</span><span><b>ctrl+enter</b> drop</span><span><b>:wq</b> dump tabs and quit</span></div>
   </section>
   <aside>
-    {{/* WaniKani block goes here: summary from the API, cached server-side */}}
-    <h2>Lately</h2>
+    {{with .WaniKani}}
+    <section class="wk{{if .Over}} over{{end}}" aria-label=WaniKani>
+      <div class=wk-head><h2>WaniKani</h2><span>{{if .Over}}over {{.Threshold}} — do them{{else}}under {{.Threshold}}{{end}}</span></div>
+      <div class=wk-num><b>{{.Reviews}}</b> reviews</div>
+      <div class=wk-bar><i style="width:{{.BarPct}}%"></i></div>
+      <div class=wk-foot>{{.Lessons}} lessons · {{.Next}}{{with .Note}} · {{.}}{{end}}</div>
+    </section>
+    {{end}}
+    <h2 class=lately-h>Lately</h2>
     <ol id=lately>
     {{range .Lately}}<li class="{{if .New}}new{{end}}"><time>{{.When}}{{if .New}} · new{{end}}</time><span>{{.Text}}</span></li>
     {{end}}</ol>

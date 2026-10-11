@@ -62,6 +62,9 @@ ENVIRONMENT
                         see wisdom.go
   DIANE_FONT_DIRS       colon-separated dirs the page's web fonts are served
                         from (see fonts.go)
+  DIANE_WANIKANI_TOKEN  WaniKani API token for the new-tab block; or put it in
+                        ~/.config/diane/wanikani-token (see wanikani.go)
+  DIANE_WANIKANI_THRESHOLD  reviews above this turn the block red (default 40)
 `
 
 // ---------------------------------------------------------------- vault
@@ -484,10 +487,11 @@ func countLinks(v *Vault) int {
 // ---------------------------------------------------------------- serve
 
 type server struct {
-	v      *Vault
-	token  string
-	wisdom *wisdom    // nil in tests
-	fonts  *fontIndex // nil in tests
+	v        *Vault
+	token    string
+	wisdom   *wisdom    // nil in tests
+	fonts    *fontIndex // nil in tests
+	wanikani *wanikani  // nil in tests
 }
 
 // isLoopback reports whether a Host header names this machine. Checked in
@@ -646,7 +650,8 @@ func cmdServe(v *Vault) error {
 	if addr == "" {
 		addr = "127.0.0.1:7777"
 	}
-	s := &server{v: v, token: token, wisdom: newWisdom(v.dir), fonts: newFontIndex()}
+	s := &server{v: v, token: token, wisdom: newWisdom(v.dir), fonts: newFontIndex(), wanikani: newWaniKani()}
+	s.wanikani.refresh(time.Now()) // so the first new tab already has numbers
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.index)
 	mux.HandleFunc("POST /drop", s.drop)

@@ -178,6 +178,18 @@ and anything not seen for a few $\tau$ is back to full weight. $\tau$ is
 `~/.local/state/diane/wisdom-seen.json`, not in the vault, so opening tabs
 never makes commits. No `wisdom.md` just means no saying.
 
+### WaniKani
+
+With a WaniKani API token, the margin shows reviews available now, lessons,
+and when the next reviews unlock; past `DIANE_WANIKANI_THRESHOLD` (default
+40) it turns red. Create a read-only token under WaniKani → Settings → API
+Tokens and put it in `~/.config/diane/wanikani-token` (mode 600), or set
+`DIANE_WANIKANI_TOKEN`. No token, no block.
+
+The summary is fetched in the background at most every 5 minutes and the page
+renders from that cache, so the API never slows a tab down. The token never
+reaches the page.
+
 ## Anton
 
 One model call per turn: the whole vault goes in the prompt, the model returns
@@ -229,6 +241,8 @@ Kokoro-82M one (`pip install kokoro-onnx soundfile`, model files into
 | `DIANE_TTS_BIN` / `DIANE_VOICE` | `piper-tts` / `~/.local/share/diane/en_US-lessac-medium.onnx` |
 | `DIANE_PLAY_BIN` | `aplay` |
 | `DIANE_WISDOM_TAU` | `12h` |
+| `DIANE_WANIKANI_TOKEN` / `_TOKEN_FILE` | — / `~/.config/diane/wanikani-token` |
+| `DIANE_WANIKANI_THRESHOLD` | `40` |
 
 ## Reading order
 
