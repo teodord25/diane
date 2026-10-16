@@ -186,9 +186,10 @@ and when the next reviews unlock; past `DIANE_WANIKANI_THRESHOLD` (default
 Tokens and put it in `~/.config/diane/wanikani-token` (mode 600), or set
 `DIANE_WANIKANI_TOKEN`. No token, no block.
 
-The summary is fetched in the background at most every 5 minutes and the page
-renders from that cache, so the API never slows a tab down. The token never
-reaches the page.
+The summary is fetched at most every 5 minutes. When the cached numbers are
+older than that (including after the machine slept), the tab waits up to
+0.8 s for a fresh fetch, then shows whatever it has. The token never reaches
+the page.
 
 ## Anton
 

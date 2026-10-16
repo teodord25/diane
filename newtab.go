@@ -203,8 +203,7 @@ func (s *server) index(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if s.wanikani != nil {
-		s.wanikani.refresh(now) // background; this tab shows the cached numbers
-		d.WaniKani = s.wanikani.view(now)
+		d.WaniKani = s.wanikani.fresh(now)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store") // a new saying every tab

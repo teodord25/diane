@@ -12,8 +12,9 @@ package main
 // No token, no block. The token is only ever sent to api.wanikani.com, never
 // to the page.
 //
-// The summary is fetched in the background, at most every 5 minutes, and the
-// page renders from the cache, so a slow or offline API never delays a tab.
+// The summary is fetched at most every 5 minutes. A tab whose cached numbers
+// are older than that waits up to wkWait for the fetch; a slow or offline API
+// costs a tab at most that, and the old numbers are shown.
 // The cache keeps the hourly buckets rather than counts, so "available now"
 // stays right as time passes between fetches.
 
@@ -30,7 +31,19 @@ import (
 	"time"
 )
 
-const wkRefresh = 5 * time.Minute
+const (
+	wkRefresh = 5 * time.Minute
+	// How long a tab waits for a fetch when the cache is out of date, so the
+	// first tab after a refresh is due (e.g. after waking from sleep) shows
+	// fresh numbers instead of the old ones.
+	wkWait = 800 * time.Millisecond
+)
+
+// wall strips Go's monotonic clock reading. The monotonic clock stops while
+// the machine is suspended, so "5 minutes since the last fetch" measured with
+// it doesn't count sleep: after waking, an hours-old cache looked fresh.
+// Wall-clock arithmetic counts the sleep.
+func wall(t time.Time) time.Time { return t.Round(0) }
 
 type wkBucket struct {
 	at time.Time
@@ -48,6 +61,7 @@ type wanikani struct {
 	fetched  time.Time // last successful fetch
 	tried    time.Time // last attempt
 	inFlight bool
+	done     chan struct{} // closed when the in-flight fetch finishes
 	err      string
 }
 
@@ -136,24 +150,34 @@ func (wk *wanikani) fetch(token string) (reviews, lessons []wkBucket, err error)
 }
 
 // refresh fetches if the cache is old and nothing is already fetching. It
-// returns immediately; the fetch runs in the background. Failures are
-// retried no more often than every 5 minutes too.
-func (wk *wanikani) refresh(now time.Time) {
+// returns immediately; the fetch runs in the background, and the returned
+// channel closes when it's done (nil if no fetch was started or is running).
+// Failures are retried no more often than every 5 minutes too.
+func (wk *wanikani) refresh(now time.Time) <-chan struct{} {
+	now = wall(now)
 	wk.mu.Lock()
-	if wk.inFlight || now.Sub(wk.tried) < wkRefresh {
+	if wk.inFlight {
+		ch := wk.done
 		wk.mu.Unlock()
-		return
+		return ch
+	}
+	if now.Sub(wk.tried) < wkRefresh {
+		wk.mu.Unlock()
+		return nil
 	}
 	token := wkToken()
 	if token == "" {
 		wk.mu.Unlock()
-		return
+		return nil
 	}
 	wk.inFlight = true
 	wk.tried = now
+	done := make(chan struct{})
+	wk.done = done
 	wk.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		reviews, lessons, err := wk.fetch(token)
 		wk.mu.Lock()
 		defer wk.mu.Unlock()
@@ -164,9 +188,10 @@ func (wk *wanikani) refresh(now time.Time) {
 			return
 		}
 		wk.reviews, wk.lessons = reviews, lessons
-		wk.fetched = time.Now()
+		wk.fetched = wall(time.Now())
 		wk.err = ""
 	}()
+	return done
 }
 
 // wkView is what the page shows.
@@ -180,7 +205,29 @@ type wkView struct {
 	Note      string // "stale · token rejected", empty when fresh
 }
 
+// due reports whether the cache is older than the refresh interval (or empty).
+func (wk *wanikani) due(now time.Time) bool {
+	wk.mu.Lock()
+	defer wk.mu.Unlock()
+	return wk.fetched.IsZero() || wall(now).Sub(wk.fetched) >= wkRefresh
+}
+
+// fresh starts a refresh if one is due and, when the cached numbers are out
+// of date, waits up to wkWait for it, then returns the view. A slow or
+// offline API costs a tab at most wkWait, and the old numbers are shown.
+func (wk *wanikani) fresh(now time.Time) *wkView {
+	stale := wk.due(now)
+	if ch := wk.refresh(now); ch != nil && stale {
+		select {
+		case <-ch:
+		case <-time.After(wkWait):
+		}
+	}
+	return wk.view(time.Now())
+}
+
 func (wk *wanikani) view(now time.Time) *wkView {
+	now = wall(now)
 	wk.mu.Lock()
 	defer wk.mu.Unlock()
 	if wk.fetched.IsZero() {

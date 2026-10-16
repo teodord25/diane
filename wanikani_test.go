@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -143,5 +144,54 @@ func TestPageWaniKaniNoLinksWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(b.String(), "subjects/review") || strings.Contains(b.String(), "/dashboard") {
 		t.Error("links shown with nothing to do")
+	}
+}
+
+// After the cache goes out of date (e.g. the machine slept), the next tab
+// must show the new numbers, not the cached ones.
+func TestWaniKaniFreshAfterStale(t *testing.T) {
+	var n atomic.Int32
+	n.Store(15)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339)
+		ids := make([]string, n.Load())
+		for i := range ids {
+			ids[i] = fmt.Sprint(i + 1)
+		}
+		fmt.Fprintf(w, `{"data":{"lessons":[],"reviews":[{"available_at":%q,"subject_ids":[%s]}]}}`, now, strings.Join(ids, ","))
+	}))
+	defer api.Close()
+	t.Setenv("DIANE_WANIKANI_TOKEN", "tok")
+	wk := &wanikani{base: api.URL, client: api.Client(), threshold: 40}
+
+	if v := wk.fresh(time.Now()); v == nil || v.Reviews != 15 {
+		t.Fatalf("first tab = %+v, want 15 reviews", v)
+	}
+	n.Store(0) // reviews done on the phone
+	// Pretend the last fetch was 10 minutes ago, in wall-clock time, which is
+	// what a suspend looks like (the monotonic clock didn't move).
+	wk.mu.Lock()
+	wk.tried = wall(time.Now().Add(-10 * time.Minute))
+	wk.fetched = wk.tried
+	wk.mu.Unlock()
+	if v := wk.fresh(time.Now()); v == nil || v.Reviews != 0 {
+		t.Errorf("tab after stale cache = %+v, want 0 reviews", v)
+	}
+}
+
+// A hung API must not hold a tab for more than wkWait.
+func TestWaniKaniFreshDoesNotBlock(t *testing.T) {
+	block := make(chan struct{})
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+	}))
+	defer api.Close()
+	defer close(block)
+	t.Setenv("DIANE_WANIKANI_TOKEN", "tok")
+	wk := &wanikani{base: api.URL, client: api.Client(), threshold: 40}
+	start := time.Now()
+	wk.fresh(start)
+	if d := time.Since(start); d > wkWait+300*time.Millisecond {
+		t.Errorf("tab waited %v", d)
 	}
 }
